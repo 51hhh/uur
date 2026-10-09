@@ -154,6 +154,12 @@ uur display source virtual
 uur stop                # Stop only uur's helpers and Wine prefix
 ```
 
+The `monitor` source can select several displays in the Portal chooser. The
+selected streams remain independent and are routed to UU's matching Windows
+display outputs, so the remote client can switch screens or request both. Run
+`uur display source monitor` again to clear an old grant and choose a different
+set of displays.
+
 If UU was started from the desktop, choose **Quit** from the launcher's
 application actions. When running from a terminal, use `uur stop` or press
 Ctrl+C.
@@ -171,7 +177,9 @@ Use the default `auto` mode after troubleshooting.
 ## 🖥️ Desktop integration
 
 - A Wayland session with both RemoteDesktop and ScreenCast portals uses one
-  combined, unprivileged session for input and video.
+  combined, unprivileged session for input and video. With `libei.so.1`
+  installed, input uses the Portal's EIS connection and matches each screen's
+  mapping ID; older portals retain the D-Bus input fallback.
 - A Wayland session with only ScreenCast uses PipeWire for video and uinput
   for full-desktop input.
 - An X11 session uses Wine's native X11 capture and XTest input.

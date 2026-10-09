@@ -6,8 +6,45 @@
 - Wayland monitor and window sources use ScreenCast/PipeWire.
 - `uur display source virtual` requests the portal's Virtual source type and
   stores its restore token.
-- A multi-stream compositor will combine or expose several PipeWire nodes to
-  UU's display topology for independent Wayland screen switching.
+- A multi-stream compositor exposes each selected PipeWire node through a
+  separate frame transport. The Windows adapter matches those transports to
+  UU's native display topology for independent Wayland screen switching.
+
+Portal input prefers its EIS connection through the optional libei runtime.
+Screen mapping IDs pair each stream with the compositor's absolute-input
+region, preserving fractional scaling and monitor-local positions. Normalized
+Windows conversions retain fractional precision until the final rounding.
+Input wheel values retain Windows units (120 per notch): vertical positive
+means up and horizontal positive means right. Portal/EIS converts only the
+vertical sign, and EIS preserves fractional notches. Whole-notch backends
+accumulate fractional values per axis instead of expanding each update.
+Legacy absolute D-Bus input is converted from compositor layout coordinates into the
+negotiated stream pixel dimensions. GNOME's monitor stream transform divides
+that position by the monitor scale; using the Portal layout size as the input
+extent would apply the fractional scale twice and move the cursor toward the
+top-left corner. Forwarded mouse and virtual-key events are injected once through the host
+backend, and combined motion/button events deliver their position first.
+Unicode, scan-code, and unmapped virtual-key events retain Wine's original
+injection path; the native bridge receives only its invariant mapped subset.
+
+The frame consumer takes the newest queued PipeWire buffer. Compatible 32-bit
+DIB capture destinations receive a direct CPU copy or scale; other GDI
+destinations reuse a stable snapshot until the stream supplies a newer image.
+Direct copies retain the DIB orientation recorded at creation; `GetObject`
+does not preserve the original height sign. Untracked bitmaps and transformed
+or mirrored drawing contexts use GDI's normal orientation handling.
+The per-process `uur-capture-status-PID.txt` file reports capture time, direct
+copies, snapshot copies, and unavailable frames for performance diagnosis.
+
+The combined Portal worker monitors the capture helper. A failed stream or
+expired input session closes the old session and negotiates a replacement
+using the saved Portal grant. Queued commands from the failed session are
+discarded; release events for inputs not held in the replacement session are
+ignored. The PE hook reconnects its loopback input bridge after a lost socket.
+Closing a capture session removes all its transports. A dead heartbeat remains
+rejected until it changes, including after the file is reopened. Wayland
+capture emits empty frames while the Portal is unavailable, rather than
+falling back to an obsolete XWayland desktop; native X11 capture is preserved.
 
 ## Codec capabilities
 

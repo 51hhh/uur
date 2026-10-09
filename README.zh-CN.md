@@ -149,6 +149,10 @@ uur display source virtual
 uur stop                # 只停止 uur 助手与专用 Wine 前缀
 ```
 
+`monitor` 来源在 Portal 选择器中支持同时勾选多个显示器；每路画面保持独立，并按坐标
+对应到 UU 的 Windows 显示器输出，因此远程端可以切换屏幕或同时请求双屏。重新选择时
+再次执行 `uur display source monitor` 以清除旧授权。
+
 从桌面启动 UU 后，可在启动器的应用操作菜单中选择“退出”；从终端运行时可执行
 `uur stop` 或按 Ctrl+C。
 
@@ -165,7 +169,8 @@ UUR_INPUT_BACKEND=xtest uur run
 ## 🖥️ 桌面集成
 
 - 同时提供 RemoteDesktop 和 ScreenCast Portal 的 Wayland 会话，使用一个无特权组合
-  会话传输输入与画面。
+  会话传输输入与画面。安装 `libei.so.1` 后，输入优先使用 Portal 的 EIS 通道，按每块
+  屏幕的映射 ID 处理坐标；旧 Portal 保留 D-Bus 输入回退。
 - 只提供 ScreenCast 的 Wayland 会话，使用 PipeWire 捕获和 uinput 全桌面输入。
 - X11 会话使用 Wine 原生 X11 捕获与 XTest 输入。
 - XWayland 下的 XTest 只是局部回退，不会被描述成完整 Wayland 桌面控制。

@@ -13,7 +13,7 @@ official 64-bit UU Remote client.
 | --- | --- | --- |
 | Wayland video | ScreenCast portal + PipeWire | Portal virtual/window sources |
 | X11 video | Wine X11 capture | ScreenCast portal when explicitly selected |
-| Wayland input | RemoteDesktop portal | uinput; XTest for XWayland windows |
+| Wayland input | RemoteDesktop portal + EIS/libei | Portal D-Bus; uinput; XTest for XWayland windows |
 | X11 input | XTest | uinput |
 | Audio | PulseAudio protocol | pipewire-pulse; ALSA |
 | Wine windows | X11/XWayland | Wine Wayland driver |
@@ -144,6 +144,13 @@ configuration, COSMIC, and other sessions whose selected portal backend
 advertises both interfaces. Interface availability—not the desktop name—makes
 the final decision.
 
+The optional `libei.so.1` runtime enables the Portal's standard EIS input
+connection. Debian/Ubuntu provides it in `libei1`; Arch provides `libei`.
+Screen mapping IDs pair each independent capture stream with its input region,
+including fractional scaling and different monitor origins. Older portals or
+systems without libei use D-Bus notifications. Once EIS is connected, uur sends
+all input through EIS rather than mixing the two protocols in one session.
+
 ### Wayland session with a capture-only portal
 
 Requirements: ScreenCast/PipeWire plus writable `/dev/uinput` for full desktop
@@ -189,8 +196,10 @@ uur display source virtual
 
 The command clears the old restore token so the next Portal session can create
 or select the requested source. X11 exposes its XRandR topology to Wine.
-Wayland currently carries one selected stream; independent multi-stream
-switching is the next display-topology adapter.
+For a monitor source, the Portal chooser allows selecting multiple displays.
+uur keeps the returned streams separate and associates their compositor
+positions with Wine's matching Windows display outputs. UU therefore retains
+its native screen switching and dual-screen scheduling on mixed-scale layouts.
 
 ## First run and normal use
 
