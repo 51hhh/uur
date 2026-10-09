@@ -29,7 +29,7 @@ const SYN_REPORT: u16 = 0;
 const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
 const REL_WHEEL: u16 = 0x08;
-const REL_HWHEEL: u16 = 0x09;
+const REL_HWHEEL: u16 = linux::REL_HWHEEL as u16;
 
 const ABS_X: u16 = 0x00;
 const ABS_Y: u16 = 0x01;
@@ -37,8 +37,8 @@ const ABS_Y: u16 = 0x01;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
-const BTN_SIDE: u16 = 0x116;
-const BTN_EXTRA: u16 = 0x117;
+const BTN_SIDE: u16 = linux::BTN_SIDE as u16;
+const BTN_EXTRA: u16 = linux::BTN_EXTRA as u16;
 const BTN_TOOL_PEN: u16 = 0x140;
 
 const BUS_VIRTUAL: u16 = 0x06;
@@ -254,6 +254,7 @@ pub struct UinputBackend {
     devices: Devices,
     held_keys: HashSet<u16>,
     held_buttons: HashSet<u16>,
+    wheel: super::WheelAccumulator,
 }
 
 impl UinputBackend {
@@ -263,6 +264,7 @@ impl UinputBackend {
             devices,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
+            wheel: super::WheelAccumulator::default(),
         })
     }
 }
@@ -322,10 +324,14 @@ impl InputBackend for UinputBackend {
     }
 
     fn wheel(&mut self, horizontal: bool, delta: i32) -> Result<()> {
+        let steps = self.wheel.steps(horizontal, delta);
+        if steps == 0 {
+            return Ok(());
+        }
         self.devices.pointer.emit(
             EV_REL,
             if horizontal { REL_HWHEEL } else { REL_WHEEL },
-            super::wheel_steps(delta),
+            steps,
         )?;
         self.devices.pointer.syn()
     }

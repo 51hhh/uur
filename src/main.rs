@@ -136,7 +136,7 @@ enum WolAction {
 enum DisplayAction {
     /// Show the configured source type.
     Status,
-    /// Use a monitor, one window, or a portal-provided virtual display.
+    /// Use one or more monitors, one window, or a portal-provided virtual display.
     Source { source: DisplaySource },
 }
 

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+use super::eis::{AbsoluteTarget, Api, Eis};
 use super::InputBackend;
 
 type Reply = SyncSender<std::result::Result<(), String>>;
@@ -28,12 +29,176 @@ struct Motion {
     y: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PointerTarget {
+    stream_id: u32,
+    x: f64,
+    y: f64,
+}
+
+#[derive(Clone, Copy)]
+struct StreamRect {
+    stream_id: u32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+fn stream_rects(streams: &[crate::capture::PortalStream]) -> Vec<StreamRect> {
+    let has_layout = streams.iter().all(|stream| {
+        stream.position.is_some()
+            && stream
+                .size
+                .is_some_and(|(width, height)| width > 0 && height > 0)
+    });
+
+    if has_layout {
+        return streams
+            .iter()
+            .map(|stream| {
+                let (x, y) = stream.position.unwrap();
+                let (width, height) = stream.size.unwrap();
+                StreamRect {
+                    stream_id: stream.node_id,
+                    x: x as f64,
+                    y: y as f64,
+                    width: width as f64,
+                    height: height as f64,
+                }
+            })
+            .collect();
+    }
+
+    let mut x = 0.0;
+    streams
+        .iter()
+        .map(|stream| {
+            let (width, height) = stream.size.unwrap_or((1, 1));
+            let rect = StreamRect {
+                stream_id: stream.node_id,
+                x,
+                y: 0.0,
+                width: width.max(1) as f64,
+                height: height.max(1) as f64,
+            };
+            x += rect.width;
+            rect
+        })
+        .collect()
+}
+
+fn pointer_target(
+    streams: &[crate::capture::PortalStream],
+    normalized_x: f64,
+    normalized_y: f64,
+) -> Option<PointerTarget> {
+    let rects = stream_rects(streams);
+    let min_x = rects.iter().map(|rect| rect.x).reduce(f64::min)?;
+    let min_y = rects.iter().map(|rect| rect.y).reduce(f64::min)?;
+    let max_x = rects
+        .iter()
+        .map(|rect| rect.x + rect.width)
+        .reduce(f64::max)?;
+    let max_y = rects
+        .iter()
+        .map(|rect| rect.y + rect.height)
+        .reduce(f64::max)?;
+    let desktop_max_x = (max_x - min_x - 1.0).max(0.0);
+    let desktop_max_y = (max_y - min_y - 1.0).max(0.0);
+    let global_x = min_x + normalized_x.clamp(0.0, 65535.0) * desktop_max_x / 65535.0;
+    let global_y = min_y + normalized_y.clamp(0.0, 65535.0) * desktop_max_y / 65535.0;
+
+    let rect = rects
+        .iter()
+        .find(|rect| {
+            let right = rect.x + rect.width;
+            let bottom = rect.y + rect.height;
+            global_x >= rect.x
+                && (global_x < right || (global_x == max_x && right == max_x))
+                && global_y >= rect.y
+                && (global_y < bottom || (global_y == max_y && bottom == max_y))
+        })
+        .or_else(|| {
+            rects.iter().min_by(|left, right| {
+                let distance = |rect: &&StreamRect| {
+                    let dx = if global_x < rect.x {
+                        rect.x - global_x
+                    } else if global_x > rect.x + rect.width {
+                        global_x - rect.x - rect.width
+                    } else {
+                        0.0
+                    };
+                    let dy = if global_y < rect.y {
+                        rect.y - global_y
+                    } else if global_y > rect.y + rect.height {
+                        global_y - rect.y - rect.height
+                    } else {
+                        0.0
+                    };
+                    dx * dx + dy * dy
+                };
+                distance(left).total_cmp(&distance(right))
+            })
+        })?;
+
+    // RemoteDesktop positions are inside a stream, so width/height themselves
+    // are outside its accepted range. This matters for normalized 65535 and
+    // for points projected out of a gap between differently aligned monitors.
+    let max_local_x = (rect.width - 1.0).max(0.0);
+    let max_local_y = (rect.height - 1.0).max(0.0);
+    Some(PointerTarget {
+        stream_id: rect.stream_id,
+        x: (global_x - rect.x).clamp(0.0, max_local_x),
+        y: (global_y - rect.y).clamp(0.0, max_local_y),
+    })
+}
+
+fn pointer_in_stream_pixels(
+    mut target: PointerTarget,
+    logical_size: (i32, i32),
+    pixel_size: (u32, u32),
+) -> PointerTarget {
+    let (logical_width, logical_height) = logical_size;
+    let (pixel_width, pixel_height) = pixel_size;
+    if logical_width > 0 && logical_height > 0 && pixel_width > 0 && pixel_height > 0 {
+        target.x = (target.x * pixel_width as f64 / logical_width as f64)
+            .clamp(0.0, (pixel_width - 1) as f64);
+        target.y = (target.y * pixel_height as f64 / logical_height as f64)
+            .clamp(0.0, (pixel_height - 1) as f64);
+    }
+    target
+}
+
+fn eis_target<'a>(
+    streams: &[crate::capture::PortalStream],
+    mapping_ids: &'a [Option<String>],
+    target: PointerTarget,
+) -> Result<AbsoluteTarget<'a>> {
+    let rects = stream_rects(streams);
+    let index = rects
+        .iter()
+        .position(|rect| rect.stream_id == target.stream_id)
+        .context("absolute input selected an unknown stream")?;
+    let rect = rects[index];
+    Ok(AbsoluteTarget {
+        mapping_id: mapping_ids.get(index).and_then(Option::as_deref),
+        fraction_x: target.x / (rect.width - 1.0).max(1.0),
+        fraction_y: target.y / (rect.height - 1.0).max(1.0),
+        global_x: rect.x + target.x,
+        global_y: rect.y + target.y,
+    })
+}
+
 struct CaptureGuard(std::process::Child);
 
 impl Drop for CaptureGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+        if let Ok(path) = crate::capture::frame_path() {
+            crate::capture::remove_frame_files(&path);
+        }
     }
 }
 
@@ -118,6 +283,91 @@ async fn portal_worker(
     pending_motion: Arc<Mutex<Option<Motion>>>,
     motion_queued: Arc<AtomicBool>,
 ) -> Result<()> {
+    let mut initialized = false;
+    let mut without_token = false;
+    loop {
+        let token = if without_token {
+            None
+        } else if initialized {
+            crate::config::Config::load()?.remote_desktop_restore_token
+        } else {
+            restore_token.clone()
+        };
+        let had_token = token.is_some();
+        let mut portal_started = false;
+        match portal_session_worker(
+            &mut receiver,
+            &ready,
+            token,
+            &pending_motion,
+            &motion_queued,
+            &mut initialized,
+            &mut portal_started,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) if had_token && !portal_started => {
+                eprintln!("saved Portal grant failed: {error}; retrying without the restore token");
+                let mut config = crate::config::Config::load()?;
+                config.remote_desktop_restore_token = None;
+                config.store()?;
+                if discard_pending_events(&mut receiver, &pending_motion, &motion_queued) {
+                    return Ok(());
+                }
+                without_token = true;
+            }
+            Err(error) if !initialized => return Err(error),
+            Err(error) => {
+                eprintln!("portal session lost: {error}; reconnecting capture and input");
+                if discard_pending_events(&mut receiver, &pending_motion, &motion_queued) {
+                    return Ok(());
+                }
+                without_token = false;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+fn discard_pending_events(
+    receiver: &mut UnboundedReceiver<Event>,
+    pending_motion: &Arc<Mutex<Option<Motion>>>,
+    motion_queued: &Arc<AtomicBool>,
+) -> bool {
+    // Commands from a closed session must not be replayed after its
+    // replacement is ready, especially queued mouse clicks.
+    let mut shutdown = false;
+    while let Ok(event) = receiver.try_recv() {
+        match event {
+            Event::Shutdown => shutdown = true,
+            Event::FlushMotion => {}
+            Event::Key(_, _, reply) | Event::Button(_, _, reply) | Event::Wheel(_, _, reply) => {
+                let _ = reply.send(Err("portal session is reconnecting".into()));
+            }
+        }
+    }
+    // Reset after draining FlushMotion events, while holding the producer's
+    // pending-motion lock. Otherwise a newly queued event can be drained while
+    // its flag remains set forever.
+    {
+        let mut pending = pending_motion.lock().unwrap();
+        pending.take();
+        motion_queued.store(false, Ordering::Release);
+    }
+    shutdown || receiver.is_closed()
+}
+
+async fn portal_session_worker(
+    receiver: &mut UnboundedReceiver<Event>,
+    ready: &SyncSender<std::result::Result<Option<String>, String>>,
+    restore_token: Option<String>,
+    pending_motion: &Arc<Mutex<Option<Motion>>>,
+    motion_queued: &Arc<AtomicBool>,
+    initialized: &mut bool,
+    portal_started: &mut bool,
+) -> Result<()> {
+    *portal_started = false;
     let portal = RemoteDesktop::new().await?;
     let screencast = Screencast::new().await?;
     let configured = crate::config::Config::load()?;
@@ -128,114 +378,275 @@ async fn portal_worker(
     }
 
     let session = portal.create_session().await?;
-    portal
-        .select_devices(
-            &session,
-            DeviceType::Keyboard | DeviceType::Pointer,
-            restore_token.as_deref(),
-            PersistMode::ExplicitlyRevoked,
-        )
-        .await?
-        .response()?;
-    screencast
-        .select_sources(
-            &session,
-            CursorMode::Embedded,
-            source.into(),
-            false,
-            None,
-            PersistMode::DoNot,
-        )
-        .await?
-        .response()?;
-    let selection = portal.start(&session, None).await?.response()?;
-    let stream = selection
-        .streams()
-        .and_then(|streams| streams.first())
-        .context("RemoteDesktop portal returned no screen stream")?;
-    let stream_id = stream.pipe_wire_node_id();
-    let (logical_width, logical_height) = stream.size().unwrap_or((65535, 65535));
-    let pipewire = screencast.open_pipe_wire_remote(&session).await?;
-    let _capture = CaptureGuard(crate::capture::spawn_helper(pipewire, stream_id)?);
-    let token = selection.restore_token().map(ToOwned::to_owned);
-    ready
-        .send(Ok(token))
-        .map_err(|_| anyhow!("portal setup receiver closed"))?;
-
-    while let Some(event) = receiver.recv().await {
-        match event {
-            Event::Key(code, down, reply) => {
-                let result = portal
-                    .notify_keyboard_keycode(
-                        &session,
-                        code,
-                        if down {
-                            KeyState::Pressed
-                        } else {
-                            KeyState::Released
-                        },
-                    )
-                    .await;
-                answer(reply, result)?;
-            }
-            Event::Button(button, down, reply) => {
-                let result = portal
-                    .notify_pointer_button(
-                        &session,
-                        button,
-                        if down {
-                            KeyState::Pressed
-                        } else {
-                            KeyState::Released
-                        },
-                    )
-                    .await;
-                answer(reply, result)?;
-            }
-            Event::FlushMotion => loop {
-                let motion = pending_motion.lock().unwrap().take();
-                let Some(motion) = motion else {
-                    motion_queued.store(false, Ordering::Release);
-                    let has_new_motion = pending_motion.lock().unwrap().is_some();
-                    if has_new_motion
-                        && motion_queued
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .is_ok()
-                    {
-                        continue;
+    let result = async {
+        portal
+            .select_devices(
+                &session,
+                DeviceType::Keyboard | DeviceType::Pointer,
+                restore_token.as_deref(),
+                PersistMode::ExplicitlyRevoked,
+            )
+            .await?
+            .response()?;
+        screencast
+            .select_sources(
+                &session,
+                CursorMode::Embedded,
+                source.into(),
+                source == ashpd::desktop::screencast::SourceType::Monitor,
+                None,
+                PersistMode::DoNot,
+            )
+            .await?
+            .response()?;
+        let selection = portal.start(&session, None).await?.response()?;
+        *portal_started = true;
+        // Start consumes the old restore token. Preserve its replacement even if
+        // a later capture or EIS setup step fails.
+        let token = selection.restore_token().map(ToOwned::to_owned);
+        let mut config = crate::config::Config::load()?;
+        config.remote_desktop_restore_token = token.clone();
+        config.store()?;
+        let mapping_ids = selection
+            .streams()
+            .context("RemoteDesktop portal returned no screen streams")?
+            .iter()
+            .map(|stream| stream.mapping_id().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+        let streams = selection
+            .streams()
+            .context("RemoteDesktop portal returned no screen streams")?
+            .iter()
+            .map(|stream| crate::capture::PortalStream {
+                node_id: stream.pipe_wire_node_id(),
+                position: stream.position(),
+                size: stream.size(),
+            })
+            .collect::<Vec<_>>();
+        let first_stream = streams
+            .first()
+            .context("RemoteDesktop portal returned no screen stream")?;
+        let first_stream_id = first_stream.node_id;
+        let mut eis = match Api::load() {
+            Ok(api) => match portal.connect_to_eis(&session).await {
+                Ok(fd) => match Eis::connect(api, fd).await {
+                    Ok(input) => {
+                        eprintln!("portal input connected through EIS");
+                        Some(input)
                     }
-                    break;
-                };
-                let result = if motion.absolute {
-                    let logical_x = motion.x.clamp(0.0, 65535.0) * logical_width as f64 / 65535.0;
-                    let logical_y = motion.y.clamp(0.0, 65535.0) * logical_height as f64 / 65535.0;
-                    portal
-                        .notify_pointer_motion_absolute(&session, stream_id, logical_x, logical_y)
-                        .await
-                } else {
-                    portal
-                        .notify_pointer_motion(&session, motion.x, motion.y)
-                        .await
-                };
-                if let Err(error) = result {
-                    eprintln!("portal pointer motion failed: {error}");
+                    Err(error) => {
+                        eprintln!("portal EIS setup failed: {error}; using D-Bus input");
+                        None
+                    }
+                },
+                Err(error) => {
+                    eprintln!("portal EIS unavailable: {error}; using D-Bus input");
+                    None
                 }
             },
-            Event::Wheel(axis, steps, reply) => {
-                answer(
-                    reply,
-                    portal
-                        .notify_pointer_axis_discrete(&session, axis, steps)
-                        .await,
-                )?;
+            Err(error) => {
+                eprintln!("portal EIS unavailable: {error}; using D-Bus input");
+                None
             }
-            Event::Shutdown => break,
+        };
+        let pipewire = screencast.open_pipe_wire_remote(&session).await?;
+        let mut capture = CaptureGuard(crate::capture::spawn_helper(pipewire, &streams)?);
+        let mut pixel_sizes = vec![None; streams.len()];
+        if !*initialized {
+            ready
+                .send(Ok(token))
+                .map_err(|_| anyhow!("portal setup receiver closed"))?;
+            *initialized = true;
+        } else {
+            let mut config = crate::config::Config::load()?;
+            config.remote_desktop_restore_token = token;
+            config.store()?;
+            eprintln!("portal capture and input session restored");
         }
+        let mut health = tokio::time::interval(Duration::from_millis(500));
+        let mut input_health = tokio::time::interval(Duration::from_millis(10));
+        input_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut session_keys = HashSet::new();
+        let mut session_buttons = HashSet::new();
+        let mut discrete_wheel = super::WheelAccumulator::default();
+
+        let result = async {
+            loop {
+                let event = tokio::select! {
+                    event = receiver.recv() => match event {
+                        Some(event) => event,
+                        None => return Ok(()),
+                    },
+                    _ = health.tick() => {
+                        if let Some(status) = capture.0.try_wait()? {
+                            anyhow::bail!("PipeWire capture helper exited ({status})");
+                        }
+                        continue;
+                    }
+                    _ = input_health.tick(), if eis.is_some() => {
+                        eis.as_mut().unwrap().dispatch()?;
+                        continue;
+                    }
+                };
+                match event {
+                    Event::Key(code, down, reply) => {
+                        if !down && !session_keys.remove(&code) {
+                            let _ = reply.send(Ok(()));
+                            continue;
+                        }
+                        if down {
+                            session_keys.insert(code);
+                        }
+                        let result = if let Some(input) = eis.as_mut() {
+                            input.key(code, down)
+                        } else {
+                            portal
+                                .notify_keyboard_keycode(
+                                    &session,
+                                    code,
+                                    if down {
+                                        KeyState::Pressed
+                                    } else {
+                                        KeyState::Released
+                                    },
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)
+                        };
+                        answer(reply, result)?;
+                    }
+                    Event::Button(button, down, reply) => {
+                        if !down && !session_buttons.remove(&button) {
+                            let _ = reply.send(Ok(()));
+                            continue;
+                        }
+                        if down {
+                            session_buttons.insert(button);
+                        }
+                        let result = if let Some(input) = eis.as_mut() {
+                            input.button(button, down)
+                        } else {
+                            portal
+                                .notify_pointer_button(
+                                    &session,
+                                    button,
+                                    if down {
+                                        KeyState::Pressed
+                                    } else {
+                                        KeyState::Released
+                                    },
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)
+                        };
+                        answer(reply, result)?;
+                    }
+                    Event::FlushMotion => loop {
+                        let motion = pending_motion.lock().unwrap().take();
+                        let Some(motion) = motion else {
+                            motion_queued.store(false, Ordering::Release);
+                            let has_new_motion = pending_motion.lock().unwrap().is_some();
+                            if has_new_motion
+                                && motion_queued
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                            {
+                                continue;
+                            }
+                            break;
+                        };
+                        let result = if motion.absolute {
+                            let mut target = pointer_target(&streams, motion.x, motion.y)
+                                .unwrap_or(PointerTarget {
+                                    stream_id: first_stream_id,
+                                    x: motion.x.clamp(0.0, 65535.0),
+                                    y: motion.y.clamp(0.0, 65535.0),
+                                });
+                            if let Some(input) = eis.as_mut() {
+                                input.absolute(eis_target(&streams, &mapping_ids, target)?)
+                            } else {
+                                if let Some(index) = streams
+                                    .iter()
+                                    .position(|stream| stream.node_id == target.stream_id)
+                                {
+                                    let pixel_size = *pixel_sizes[index].get_or_insert_with(|| {
+                                        crate::capture::frame_pixel_size(index).unwrap_or((0, 0))
+                                    });
+                                    if pixel_size == (0, 0) {
+                                        pixel_sizes[index] = None;
+                                    } else if let Some(size) = streams[index].size {
+                                        target = pointer_in_stream_pixels(target, size, pixel_size);
+                                    }
+                                }
+                                portal
+                                    .notify_pointer_motion_absolute(
+                                        &session,
+                                        target.stream_id,
+                                        target.x,
+                                        target.y,
+                                    )
+                                    .await
+                                    .map_err(anyhow::Error::from)
+                            }
+                        } else {
+                            if let Some(input) = eis.as_mut() {
+                                input.relative(motion.x, motion.y)
+                            } else {
+                                portal
+                                    .notify_pointer_motion(&session, motion.x, motion.y)
+                                    .await
+                                    .map_err(anyhow::Error::from)
+                            }
+                        };
+                        if let Err(error) = result {
+                            eprintln!("portal pointer motion failed: {error}");
+                            let message = error.to_string();
+                            if eis.is_some()
+                                || message.contains("Invalid session")
+                                || message.contains("Session not started")
+                            {
+                                return Err(error);
+                            }
+                        }
+                    },
+                    Event::Wheel(axis, delta, reply) => {
+                        let horizontal = matches!(axis, Axis::Horizontal);
+                        let result = if let Some(input) = eis.as_mut() {
+                            input.wheel(horizontal, delta)
+                        } else {
+                            let steps = discrete_wheel.steps(horizontal, delta);
+                            if steps == 0 {
+                                Ok(())
+                            } else {
+                                portal
+                                    .notify_pointer_axis_discrete(&session, axis, steps)
+                                    .await
+                                    .map_err(anyhow::Error::from)
+                            }
+                        };
+                        answer(reply, result)?;
+                    }
+                    Event::Shutdown => break,
+                }
+            }
+            Ok(())
+        }
+        .await;
+        result
     }
-    Ok(())
+    .await;
+    // A helper failure does not necessarily close the Portal session. Close
+    // it explicitly before negotiating a replacement with the saved grant.
+    let _ = session.close().await;
+    result
 }
 
-fn answer<T>(reply: Reply, result: std::result::Result<T, ashpd::Error>) -> Result<()> {
+fn answer<T>(reply: Reply, result: Result<T>) -> Result<()> {
     let failure = result.as_ref().err().map(ToString::to_string);
     let _ = reply.send(result.map(|_| ()).map_err(|error| error.to_string()));
     failure.map_or(Ok(()), |error| Err(anyhow!(error)))
@@ -304,8 +715,8 @@ impl InputBackend for PortalBackend {
         } else {
             Axis::Vertical
         };
-        let steps = super::wheel_steps(delta);
-        self.submit(|reply| Event::Wheel(axis, steps, reply))
+        let delta = super::portal_wheel_delta(horizontal, delta);
+        self.submit(|reply| Event::Wheel(axis, delta, reply))
     }
 
     fn release_all(&mut self) -> Result<()> {
@@ -342,7 +753,8 @@ impl Drop for PortalBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_motion, Motion};
+    use super::{merge_motion, pointer_in_stream_pixels, pointer_target, Motion, PointerTarget};
+    use crate::capture::PortalStream;
 
     #[test]
     fn absolute_motion_keeps_only_the_latest_position() {
@@ -383,5 +795,83 @@ mod tests {
                 y: 3.0,
             })
         );
+    }
+
+    #[test]
+    fn absolute_motion_selects_the_matching_monitor() {
+        let streams = [
+            PortalStream {
+                node_id: 17,
+                position: Some((-1920, 0)),
+                size: Some((1920, 1080)),
+            },
+            PortalStream {
+                node_id: 23,
+                position: Some((0, 0)),
+                size: Some((2560, 1600)),
+            },
+        ];
+
+        let left = pointer_target(&streams, 0.0, 0.0).unwrap();
+        assert_eq!(left.stream_id, 17);
+        assert_eq!(left.x, 0.0);
+
+        let right = pointer_target(&streams, 65535.0, 65535.0).unwrap();
+        assert_eq!(
+            right,
+            PointerTarget {
+                stream_id: 23,
+                x: 2559.0,
+                y: 1599.0,
+            }
+        );
+
+        let boundary_coordinate = (1920.0_f64 / 4479.0 * 65535.0).ceil();
+        let boundary = pointer_target(&streams, boundary_coordinate, 0.0).unwrap();
+        assert_eq!(boundary.stream_id, 23);
+        assert!(boundary.x < 1.0);
+    }
+
+    #[test]
+    fn streams_without_positions_are_arranged_horizontally() {
+        let streams = [
+            PortalStream {
+                node_id: 1,
+                position: None,
+                size: Some((100, 100)),
+            },
+            PortalStream {
+                node_id: 2,
+                position: None,
+                size: Some((100, 100)),
+            },
+        ];
+        assert_eq!(pointer_target(&streams, 65535.0, 0.0).unwrap().stream_id, 2);
+    }
+
+    #[test]
+    fn absolute_input_uses_stream_pixels_on_fractionally_scaled_monitors() {
+        let primary = pointer_in_stream_pixels(
+            PointerTarget {
+                stream_id: 23,
+                x: 960.0,
+                y: 600.0,
+            },
+            (1920, 1200),
+            (2560, 1600),
+        );
+        assert_eq!(primary.x, 1280.0);
+        assert_eq!(primary.y, 800.0);
+        let secondary = pointer_in_stream_pixels(
+            PointerTarget {
+                stream_id: 17,
+                x: 1280.0,
+                y: 720.0,
+            },
+            (2560, 1440),
+            (3840, 2160),
+        );
+        assert_eq!(secondary.x, 1920.0);
+        assert_eq!(secondary.y, 1080.0);
     }
 }

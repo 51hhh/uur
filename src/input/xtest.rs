@@ -23,6 +23,7 @@ pub struct XtestBackend {
     screen: usize,
     held_keys: HashSet<Keycode>,
     held_buttons: HashSet<u8>,
+    wheel: super::WheelAccumulator,
 }
 
 impl XtestBackend {
@@ -33,6 +34,7 @@ impl XtestBackend {
             screen,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
+            wheel: super::WheelAccumulator::default(),
         })
     }
 
@@ -80,7 +82,14 @@ impl InputBackend for XtestBackend {
     }
 
     fn button(&mut self, button: u16, down: bool) -> Result<()> {
-        // Windows and X11 agree on 1-based button numbering.
+        let button = match button {
+            1 => 1,
+            2 => 3, // Windows right button is X11 button 3.
+            3 => 2, // Windows middle button is X11 button 2.
+            8 => 8,
+            9 => 9,
+            _ => anyhow::bail!("unsupported pointer button {button}"),
+        };
         self.fake(
             if down {
                 FAKE_BUTTON_PRESS
@@ -115,7 +124,7 @@ impl InputBackend for XtestBackend {
         // X11 has no wheel concept: synthesize button 4/5 (vertical) and
         // 6/7 (horizontal) presses, one per notch.
         let (up_button, down_button) = if horizontal { (7u8, 6u8) } else { (4u8, 5u8) };
-        let steps = super::wheel_steps(delta);
+        let steps = self.wheel.steps(horizontal, delta);
         for _ in 0..steps.unsigned_abs() {
             let button = if steps > 0 { up_button } else { down_button };
             self.fake(FAKE_BUTTON_PRESS, button, 0, 0)?;
@@ -144,11 +153,18 @@ impl XtestBackend {
     /// keys is Phase 2 together with the semantic text path.
     fn vkey_to_keycode(&self, vkey: u16) -> Result<Keycode> {
         let base = (vkey & 0xff) as u32;
+        let extended = vkey & 0x100 != 0;
 
         let keysym: u32 = match base {
             0x08 => 0xff08,                        // BackSpace
             0x09 => 0xff09,                        // Tab
+            0x0d if extended => 0xff8d,            // KP Enter
             0x0d => 0xff0d,                        // Return
+            0x10 | 0xa0 => 0xffe1,                 // Shift L
+            0x11 | 0xa2 if extended => 0xffe4,     // Control R
+            0x11 | 0xa2 => 0xffe3,                 // Control L
+            0x12 | 0xa4 if extended => 0xffea,     // Alt R
+            0x12 | 0xa4 => 0xffe9,                 // Alt L
             0x13 => 0xff13,                        // Pause
             0x14 => 0xffe5,                        // Caps Lock
             0x1b => 0xff1b,                        // Escape
@@ -161,8 +177,8 @@ impl XtestBackend {
             0x26 => 0xff52,                        // Up
             0x27 => 0xff53,                        // Right
             0x28 => 0xff54,                        // Down
-            0x2d => 0xffff,                        // Insert
-            0x2e => 0xff9f,                        // Delete (keypad-style)
+            0x2d => 0xff63,                        // Insert
+            0x2e => 0xffff,                        // Delete
             0x30..=0x39 => base,                   // 0-9
             0x41..=0x5a => base + 0x20,            // A-Z -> lowercase keysyms
             0x60..=0x69 => 0xffb0 + (base - 0x60), // KP_0..KP_9
@@ -172,11 +188,8 @@ impl XtestBackend {
             0x6e => 0xffae,                        // KP decimal
             0x6f => 0xffaf,                        // KP divide
             0x70..=0x87 => 0xffbe + (base - 0x70), // F1..F24
-            0xa0 => 0xffe1,                        // Shift L
             0xa1 => 0xffe2,                        // Shift R
-            0xa2 => 0xffe3,                        // Control L
             0xa3 => 0xffe4,                        // Control R
-            0xa4 => 0xffe9,                        // Alt L
             0xa5 => 0xffea,                        // Alt R
             0x5b => 0xffeb,                        // Meta L
             0x5c => 0xffec,                        // Meta R
@@ -205,7 +218,7 @@ impl XtestBackend {
         if keysym != 0 {
             let per = map.keysyms_per_keycode.max(1) as usize;
             for (index, chunk) in map.keysyms.chunks(per).enumerate() {
-                if chunk.contains(&keysym) {
+                if chunk.contains(&keysym) || (keysym == 0xffea && chunk.contains(&0xfe03)) {
                     return Ok(min + index as Keycode);
                 }
             }
@@ -214,5 +227,120 @@ impl XtestBackend {
         // Layout does not represent this key: nearest identity fallback
         // keeps events flowing instead of dropping them silently.
         Ok(base as Keycode)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::XtestBackend;
+    use crate::input::InputBackend;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt, EventMask};
+    use x11rb::protocol::Event;
+
+    #[test]
+    #[ignore = "requires an isolated X server; run with xvfb-run"]
+    fn native_x11_buttons_scroll_and_relative_motion() {
+        let mut backend = XtestBackend::connect().unwrap();
+        let root = backend.root();
+        backend
+            .conn
+            .change_window_attributes(
+                root,
+                &ChangeWindowAttributesAux::new().event_mask(
+                    EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | EventMask::KEY_PRESS
+                        | EventMask::KEY_RELEASE,
+                ),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        backend.motion(true, 32768, 32768).unwrap();
+        let before = backend.conn.query_pointer(root).unwrap().reply().unwrap();
+        backend.motion(false, 11, 7).unwrap();
+        let after = backend.conn.query_pointer(root).unwrap().reply().unwrap();
+        assert_eq!(
+            (after.root_x, after.root_y),
+            (before.root_x + 11, before.root_y + 7)
+        );
+
+        fn next_input_event(backend: &XtestBackend) -> Event {
+            loop {
+                let event = backend.conn.wait_for_event().unwrap();
+                if !matches!(event, Event::MappingNotify(_)) {
+                    return event;
+                }
+            }
+        }
+        fn button_pair(backend: &XtestBackend, expected: u8) {
+            match next_input_event(backend) {
+                Event::ButtonPress(event) => assert_eq!(event.detail, expected),
+                event => panic!("expected native button press, got {event:?}"),
+            }
+            match next_input_event(backend) {
+                Event::ButtonRelease(event) => assert_eq!(event.detail, expected),
+                event => panic!("expected native button release, got {event:?}"),
+            }
+        }
+        for (windows, native) in [(1, 1), (2, 3), (3, 2), (8, 8), (9, 9)] {
+            backend.button(windows, true).unwrap();
+            backend.button(windows, false).unwrap();
+            button_pair(&backend, native);
+        }
+        for (horizontal, delta, native) in [
+            (false, 120, 4),
+            (false, -120, 5),
+            (true, 120, 7),
+            (true, -120, 6),
+        ] {
+            backend.wheel(horizontal, delta).unwrap();
+            button_pair(&backend, native);
+        }
+        backend.wheel(false, 60).unwrap();
+        backend.conn.get_input_focus().unwrap().reply().unwrap();
+        assert!(backend.conn.poll_for_event().unwrap().is_none());
+        backend.wheel(false, 60).unwrap();
+        button_pair(&backend, 4);
+        backend
+            .conn
+            .set_input_focus(
+                x11rb::protocol::xproto::InputFocus::POINTER_ROOT,
+                root,
+                x11rb::CURRENT_TIME,
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        for (windows, keysym) in [
+            (0x41, 0x61),
+            (0x10, 0xffe1),
+            (0x11, 0xffe3),
+            (0x111, 0xffe4),
+            (0x12, 0xffe9),
+            (0x10d, 0xff8d),
+            (0x2d, 0xff63),
+            (0x2e, 0xffff),
+        ] {
+            backend.key(windows, true).unwrap();
+            backend.key(windows, false).unwrap();
+            match next_input_event(&backend) {
+                Event::KeyPress(event) => {
+                    let mapping = backend
+                        .conn
+                        .get_keyboard_mapping(event.detail, 1)
+                        .unwrap()
+                        .reply()
+                        .unwrap();
+                    assert!(
+                        mapping.keysyms.contains(&keysym),
+                        "wrong native key for Windows {windows:x}"
+                    );
+                }
+                event => panic!("expected native key press, got {event:?}"),
+            }
+            assert!(matches!(next_input_event(&backend), Event::KeyRelease(_)));
+        }
     }
 }

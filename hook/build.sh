@@ -54,6 +54,8 @@ done
 
 "$cc" "${flags[@]}" -o "$out/selftest.exe" \
     "$root/hook/selftest.c" -L"$out" -lwevtapi -luser32 -lgdi32
+"$cc" "${flags[@]}" -o "$out/orientation-selftest.exe" \
+    "$root/hook/orientation-selftest.c" -L"$out" -lwevtapi -luser32 -lgdi32
 
 "$strip" --strip-unneeded "$out/uur-hook.dll" "$out/wevtapi.dll" \
     "$out/wtsapi32.dll" "$out/winlogon.exe" \
