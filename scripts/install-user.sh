@@ -26,7 +26,8 @@ install -Dm0755 "$root/target/release/uur" "$prefix/bin/uur"
 for helper in uur-pw-capture; do
     install -Dm0755 "$root/capture/$helper" "$prefix/lib/uur/$helper"
 done
-for dll in wevtapi.dll uur-hook.dll winlogon.exe uur-terminal-proxy.exe; do
+for dll in wevtapi.dll uur-hook.dll wtsapi32.dll winlogon.exe \
+    uur-terminal-proxy.exe uur-mux-proxy.exe uur-launch-proxy.exe; do
     install -Dm0644 "$root/build/hook/$dll" "$prefix/lib/uur/hook/$dll"
 done
 

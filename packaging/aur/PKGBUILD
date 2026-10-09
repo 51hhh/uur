@@ -25,6 +25,7 @@ depends=(
 )
 makedepends=('cargo' 'gcc' 'pkgconf' 'mingw-w64-gcc' 'mingw-w64-binutils')
 optdepends=(
+    'libei: Portal EIS input with per-monitor coordinate mapping'
     'osslsigncode: Authenticode verification of official updater downloads'
     'xdg-desktop-portal-gnome: GNOME, niri, and compatible Wayland capture/input'
     'xdg-desktop-portal-kde: KDE Plasma Wayland capture/input'

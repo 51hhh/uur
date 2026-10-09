@@ -20,8 +20,16 @@ jobs:
           cargo test --locked --all-targets
           cc -std=c11 -O2 -Wall -Wextra -Werror tests/frame-protocol.c -o /tmp/frame-protocol
           /tmp/frame-protocol
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/frame-copy.c -o /tmp/frame-copy
+          /tmp/frame-copy
           cc -std=c11 -O2 -Wall -Wextra -Werror tests/cursor-overlay.c -o /tmp/cursor-overlay
           /tmp/cursor-overlay
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/capture-mapping.c -o /tmp/capture-mapping
+          /tmp/capture-mapping
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/capture-layout.c -o /tmp/capture-layout
+          /tmp/capture-layout
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/input-mapping.c -o /tmp/input-mapping
+          /tmp/input-mapping
       - name: Build
         run: cargo build --locked --release
 

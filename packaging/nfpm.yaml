@@ -26,6 +26,7 @@ overrides:
       - libpipewire-0.3-0
       - xdg-desktop-portal
     recommends:
+      - libei1
       - xdg-desktop-portal-gnome | xdg-desktop-portal-kde | xdg-desktop-portal-wlr
       - ethtool
       - network-manager
