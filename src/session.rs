@@ -45,13 +45,7 @@ fn complete_hook_directory(dir: &Path) -> bool {
 }
 
 fn hook_dir() -> Result<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("/usr/lib/uur/hook"),
-        PathBuf::from("/usr/local/lib/uur/hook"),
-    ];
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(home).join(".local/lib/uur/hook"));
-    }
+    let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("../lib/uur/hook"));
@@ -59,6 +53,11 @@ fn hook_dir() -> Result<PathBuf> {
             candidates.push(dir.to_path_buf());
         }
     }
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/lib/uur/hook"));
+    }
+    candidates.push(PathBuf::from("/usr/local/lib/uur/hook"));
+    candidates.push(PathBuf::from("/usr/lib/uur/hook"));
     candidates
         .into_iter()
         .find(|dir| complete_hook_directory(dir))
@@ -66,28 +65,24 @@ fn hook_dir() -> Result<PathBuf> {
 }
 
 fn hook_source_dir() -> Result<PathBuf> {
-    let mut candidates = vec![PathBuf::from("/usr/lib/uur/hook")];
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(home).join(".local/lib/uur/hook"));
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("../lib/uur/hook"));
+            candidates.push(dir.join("../../build/hook"));
+        }
     }
-    candidates.push(
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("../lib/uur/hook")))
-            .unwrap_or_default(),
-    );
-    candidates.push(
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("../../build/hook")))
-            .unwrap_or_default(),
-    );
     candidates.push(
         std::env::current_dir()
             .ok()
             .map(|dir| dir.join("build/hook"))
             .unwrap_or_default(),
     );
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/lib/uur/hook"));
+    }
+    candidates.push(PathBuf::from("/usr/local/lib/uur/hook"));
+    candidates.push(PathBuf::from("/usr/lib/uur/hook"));
     candidates
         .into_iter()
         .find(|dir| complete_hook_directory(dir))
@@ -389,7 +384,7 @@ impl SessionResources {
         }
         stop_wineserver(&self.prefix);
         if let Ok(path) = frame_path() {
-            let _ = std::fs::remove_file(path);
+            crate::capture::remove_frame_files(&path);
         }
     }
 }
@@ -428,17 +423,28 @@ pub fn start() -> Result<()> {
     // Bridge configuration as a file inside the prefix: any process the
     // Wine service manager respawns reads it, env or not.
     let frames = frame_path()?;
+    // Do this before any Wine process starts. If the last session was killed,
+    // its mapped file can otherwise keep serving an obsolete desktop frame
+    // until the new portal helper finishes negotiating.
+    crate::capture::remove_frame_files(&frames);
     let backend_status = crate::config::runtime_dir()?.join("backend");
     let _ = std::fs::remove_file(&backend_status);
     std::env::set_var("UUR_FRAME_PATH", &frames);
     std::env::set_var("UUR_BACKEND_STATUS", &backend_status);
+    let capture_backend = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        "portal"
+    } else {
+        "x11"
+    };
+    std::env::set_var("UUR_CAPTURE_BACKEND", capture_backend);
     std::fs::write(
         prefix.join("drive_c/uur-bridge.ini"),
         format!(
-            "[bridge]\nport={}\ntoken={}\nframe_path={}\n",
+            "[bridge]\nport={}\ntoken={}\nframe_path={}\ncapture_backend={}\n",
             config.bridge_port,
             config.bridge_token,
-            unix_path_to_wine(&frames)
+            unix_path_to_wine(&frames),
+            capture_backend
         ),
     )
     .context("writing uur-bridge.ini")?;
@@ -687,8 +693,7 @@ pub fn stop() -> Result<()> {
             }
             for _ in 0..100 {
                 if process_start_time(pid).is_err() {
-                    println!("{}", t!("bridge.stop_requested"));
-                    return Ok(());
+                    break;
                 }
                 thread::sleep(std::time::Duration::from_millis(100));
             }
@@ -696,7 +701,7 @@ pub fn stop() -> Result<()> {
     }
     stop_wineserver(&prefix);
     if let Ok(path) = frame_path() {
-        let _ = std::fs::remove_file(path);
+        crate::capture::remove_frame_files(&path);
     }
     println!("{}", t!("bridge.stop_requested"));
     Ok(())
@@ -815,10 +820,90 @@ fn parse_xft_dpi(resources: &str) -> Option<u32> {
 }
 
 fn stop_wineserver(prefix: &Path) {
-    let _ = Command::new("wineserver")
-        .env("WINEPREFIX", prefix)
-        .arg("-k")
-        .status();
+    for executable in [
+        Path::new("wineserver"),
+        Path::new("/usr/lib/x86_64-linux-gnu/wine/wineserver"),
+        Path::new("/usr/lib64/wine/wineserver"),
+    ] {
+        if Command::new(executable)
+            .env("WINEPREFIX", prefix)
+            .arg("-k")
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            /* -k only requests shutdown. Wait for the server so Wine service
+             * children do not keep a systemd unit in final-sigterm until its
+             * 90-second stop timeout. Escalate only the managed prefix's
+             * wineserver when graceful shutdown itself stalls. */
+            let waited = run_with_timeout(
+                Command::new(executable).env("WINEPREFIX", prefix).arg("-w"),
+                std::time::Duration::from_secs(5),
+            )
+            .is_some();
+            if !waited {
+                let _ = Command::new(executable)
+                    .env("WINEPREFIX", prefix)
+                    .arg("-k9")
+                    .status();
+                let _ = run_with_timeout(
+                    Command::new(executable).env("WINEPREFIX", prefix).arg("-w"),
+                    std::time::Duration::from_secs(2),
+                );
+            }
+            break;
+        }
+    }
+    kill_managed_prefix_processes(prefix);
+}
+
+fn environment_uses_prefix(environment: &[u8], prefix: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut expected = b"WINEPREFIX=".to_vec();
+    expected.extend_from_slice(prefix.as_os_str().as_bytes());
+    environment
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == expected)
+}
+
+fn managed_prefix_processes(prefix: &Path) -> Vec<u32> {
+    let own_pid = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            if pid == own_pid {
+                return None;
+            }
+            let environment = std::fs::read(entry.path().join("environ")).ok()?;
+            environment_uses_prefix(&environment, prefix).then_some(pid)
+        })
+        .collect()
+}
+
+fn kill_managed_prefix_processes(prefix: &Path) {
+    let remaining = managed_prefix_processes(prefix);
+    if remaining.is_empty() {
+        return;
+    }
+    eprintln!(
+        "forcing {} residual process(es) from the managed Wine prefix to exit",
+        remaining.len()
+    );
+    for pid in remaining {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+    for _ in 0..20 {
+        if managed_prefix_processes(prefix).is_empty() {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 fn wine_debug() -> String {
@@ -830,6 +915,20 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn process_environment_matches_only_the_exact_wine_prefix() {
+        let environment = b"HOME=/home/test\0WINEPREFIX=/tmp/uur/wine\0DISPLAY=:0\0";
+        assert!(environment_uses_prefix(
+            environment,
+            Path::new("/tmp/uur/wine")
+        ));
+        assert!(!environment_uses_prefix(environment, Path::new("/tmp/uur")));
+        assert!(!environment_uses_prefix(
+            environment,
+            Path::new("/tmp/uur/wine-other")
+        ));
+    }
 
     struct TestDirectory(PathBuf);
 
