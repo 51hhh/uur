@@ -21,17 +21,6 @@ struct XlibInjector {
     display: Handle,
     close_display: unsafe extern "C" fn(Handle) -> libc::c_int,
     flush: unsafe extern "C" fn(Handle) -> libc::c_int,
-    warp_pointer: unsafe extern "C" fn(
-        Handle,
-        libc::c_ulong,
-        libc::c_ulong,
-        libc::c_int,
-        libc::c_int,
-        libc::c_uint,
-        libc::c_uint,
-        libc::c_int,
-        libc::c_int,
-    ) -> libc::c_int,
     fake_key: unsafe extern "C" fn(Handle, libc::c_uint, libc::c_int, libc::c_ulong) -> libc::c_int,
     fake_button:
         unsafe extern "C" fn(Handle, libc::c_uint, libc::c_int, libc::c_ulong) -> libc::c_int,
@@ -72,7 +61,6 @@ impl XlibInjector {
             unsafe { symbol(&x11, c"XInitThreads")? };
         let close_display = unsafe { symbol(&x11, c"XCloseDisplay")? };
         let flush = unsafe { symbol(&x11, c"XFlush")? };
-        let warp_pointer = unsafe { symbol(&x11, c"XWarpPointer")? };
         if unsafe { init_threads() } == 0 {
             anyhow::bail!("XInitThreads failed");
         }
@@ -88,7 +76,6 @@ impl XlibInjector {
             display,
             close_display,
             flush,
-            warp_pointer,
             fake_key,
             fake_button,
             fake_relative_motion,
@@ -110,13 +97,6 @@ impl XlibInjector {
     fn relative_motion(&self, x: i32, y: i32) -> Result<()> {
         let result = unsafe { (self.fake_relative_motion)(self.display, x, y, 0) };
         self.finish(result, "XTestFakeRelativeMotionEvent")
-    }
-
-    fn absolute_motion(&self, root: u32, x: i32, y: i32) {
-        unsafe {
-            (self.warp_pointer)(self.display, 0, root.into(), 0, 0, 0, 0, x, y);
-            (self.flush)(self.display);
-        }
     }
 
     fn finish(&self, result: libc::c_int, operation: &'static str) -> Result<()> {
@@ -144,6 +124,7 @@ pub struct XtestBackend {
     held_keys: HashSet<Keycode>,
     held_buttons: HashSet<u8>,
     wheel: super::WheelAccumulator,
+    absolute_warp_pending: bool,
 }
 
 impl XtestBackend {
@@ -157,6 +138,7 @@ impl XtestBackend {
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
             wheel: super::WheelAccumulator::default(),
+            absolute_warp_pending: false,
         })
     }
 
@@ -164,9 +146,24 @@ impl XtestBackend {
         self.conn.setup().roots[self.screen].root
     }
 
-    fn screen_size(&self) -> (i32, i32) {
+    fn screen_size(&self) -> (i16, i16) {
         let root = &self.conn.setup().roots[self.screen];
-        (root.width_in_pixels.into(), root.height_in_pixels.into())
+        (root.width_in_pixels as i16, root.height_in_pixels as i16)
+    }
+
+    fn synchronize_absolute_warp(&mut self) -> Result<()> {
+        if self.absolute_warp_pending {
+            // XWarpPointer and libXtst use separate X connections. Wait only
+            // before the first dependent event so high-rate motion itself
+            // stays asynchronous and does not acquire one round trip per frame.
+            self.conn
+                .get_input_focus()
+                .context("synchronizing XWarpPointer")?
+                .reply()
+                .context("synchronizing XWarpPointer reply")?;
+            self.absolute_warp_pending = false;
+        }
+        Ok(())
     }
 }
 
@@ -187,6 +184,7 @@ impl InputBackend for XtestBackend {
     }
 
     fn button(&mut self, button: u16, down: bool) -> Result<()> {
+        self.synchronize_absolute_warp()?;
         let button = match button {
             1 => 1,
             2 => 3, // Windows right button is X11 button 3.
@@ -207,16 +205,18 @@ impl InputBackend for XtestBackend {
     fn motion(&mut self, absolute: bool, x: i32, y: i32) -> Result<()> {
         if absolute {
             let (width, height) = self.screen_size();
-            let clamped_x = ((x.clamp(0, 65535) as i64 * (width as i64 - 1)) / 65535) as i32;
-            let clamped_y = ((y.clamp(0, 65535) as i64 * (height as i64 - 1)) / 65535) as i32;
+            let clamped_x = ((x.clamp(0, 65535) as i64 * (width as i64 - 1)) / 65535) as i16;
+            let clamped_y = ((y.clamp(0, 65535) as i64 * (height as i64 - 1)) / 65535) as i16;
             // Xwayland accepts a core pointer warp for the complete desktop,
             // but ignores XTest absolute-motion events. Coordinates have
             // already been normalized across the selected monitor layout.
-            // Use the same Xlib connection as subsequent buttons so the X
-            // server cannot reorder a click ahead of its target position.
-            self.injector
-                .absolute_motion(self.root(), clamped_x, clamped_y);
+            self.conn
+                .warp_pointer(x11rb::NONE, self.root(), 0, 0, 0, 0, clamped_x, clamped_y)
+                .context("XWarpPointer")?;
+            self.conn.flush()?;
+            self.absolute_warp_pending = true;
         } else {
+            self.synchronize_absolute_warp()?;
             self.injector.relative_motion(x, y)?;
         }
         Ok(())
@@ -227,6 +227,9 @@ impl InputBackend for XtestBackend {
         // 6/7 (horizontal) presses, one per notch.
         let (up_button, down_button) = if horizontal { (7u8, 6u8) } else { (4u8, 5u8) };
         let steps = self.wheel.steps(horizontal, delta);
+        if steps != 0 {
+            self.synchronize_absolute_warp()?;
+        }
         for _ in 0..steps.unsigned_abs() {
             let button = if steps > 0 { up_button } else { down_button };
             self.injector.button(button, true)?;
@@ -236,6 +239,9 @@ impl InputBackend for XtestBackend {
     }
 
     fn release_all(&mut self) -> Result<()> {
+        if !self.held_buttons.is_empty() {
+            self.synchronize_absolute_warp()?;
+        }
         for keycode in self.held_keys.clone() {
             self.injector.key(keycode, false)?;
         }
