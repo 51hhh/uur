@@ -409,7 +409,11 @@ async fn portal_session_worker(
         screencast
             .select_sources(
                 &session,
-                CursorMode::Embedded,
+                // The Wine hook draws the cursor at its Win32 position. This
+                // avoids capturing Mutter's hardware cursor when an absolute
+                // Xwayland warp intentionally leaves the compositor seat in
+                // place.
+                CursorMode::Hidden,
                 source.into(),
                 source == ashpd::desktop::screencast::SourceType::Monitor,
                 None,

@@ -199,7 +199,11 @@ async fn negotiate(
     screencast
         .select_sources(
             &session,
-            CursorMode::Embedded,
+            // Mutter's embedded cursor follows the compositor seat. Absolute
+            // Xwayland warps update Win32 hit testing without moving that
+            // hardware cursor, so the hook composites Wine's current cursor
+            // after copying each Portal frame.
+            CursorMode::Hidden,
             source.into(),
             source == ashpd::desktop::screencast::SourceType::Monitor,
             restore_token,

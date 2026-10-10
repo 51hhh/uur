@@ -623,9 +623,11 @@ static BOOL source_is_screen_dc(HDC source)
            GetDeviceCaps(source, TECHNOLOGY) == DT_RASDISPLAY;
 }
 
-/* GDI screen captures do not include the X11 hardware cursor.  Keep the
- * cursor visible in the fallback path used on X11 by compositing Wine's
- * current cursor onto the capture destination after the desktop blit. */
+/* Portal capture intentionally hides the compositor's hardware cursor because
+ * an Xwayland absolute warp updates Win32 hit testing without moving Mutter's
+ * seat cursor. Composite Wine's current cursor after every screen blit so the
+ * shared picture follows the same position that receives clicks. This also
+ * supplies the cursor for the native GDI fallback, which never includes it. */
 static void draw_cursor_overlay(HDC hdc_dest, int x, int y, int width, int height,
                                 int source_x, int source_y, int source_width,
                                 int source_height)
@@ -1007,8 +1009,11 @@ BOOL WINAPI hook_bit_blt(HDC hdc_dest, int x, int y, int width, int height,
 {
     BOOL result;
     if (try_capture_feed(hdc_dest, x, y, rop, hdc_src, width, height, x_src,
-                         y_src, width, height))
+                         y_src, width, height)) {
+        draw_cursor_overlay(hdc_dest, x, y, width, height, x_src, y_src,
+                            width, height);
         return TRUE;
+    }
     result = original_bit_blt(hdc_dest, x, y, width, height, hdc_src, x_src,
                               y_src, rop);
     if (result && (rop & 0x00ffffffu) == SRCCOPY && hdc_src != NULL &&
@@ -1024,8 +1029,10 @@ BOOL WINAPI hook_stretch_blt(HDC hdc_dest, int x, int y, int w, int h,
 {
     BOOL result;
     if (try_capture_feed(hdc_dest, x, y, rop, hdc_src, w, h, xs, ys, sw,
-                         sh))
+                         sh)) {
+        draw_cursor_overlay(hdc_dest, x, y, w, h, xs, ys, sw, sh);
         return TRUE;
+    }
     result = original_stretch_blt(hdc_dest, x, y, w, h, hdc_src, xs, ys, sw,
                                   sh, rop);
     if (result && (rop & 0x00ffffffu) == SRCCOPY && hdc_src != NULL &&
