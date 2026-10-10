@@ -345,6 +345,13 @@ impl ManagedChild {
         }
         let _ = self.child.wait();
     }
+
+    fn ensure_running(&mut self, label: &str) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            anyhow::bail!("{label} exited during startup ({status})");
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ManagedChild {
@@ -492,10 +499,9 @@ pub fn start() -> Result<()> {
         Ok(helper) => resources.helpers.push(helper),
         Err(error) => eprintln!("desktop inhibition unavailable: {error}"),
     }
-    resources
-        .helpers
-        .push(ManagedChild::spawn_internal("__bridge", &log)?);
-    wait_for_bridge(config.bridge_port, &stopping)?;
+    let mut bridge = ManagedChild::spawn_internal("__bridge", &log)?;
+    wait_for_bridge(config.bridge_port, &backend_status, &mut bridge, &stopping)?;
+    resources.helpers.push(bridge);
     let selected_backend = std::fs::read_to_string(&backend_status).unwrap_or_default();
     let _ = std::fs::remove_file(&backend_status);
     if std::env::var_os("WAYLAND_DISPLAY").is_some() && selected_backend.trim() != "portal" {
@@ -759,20 +765,33 @@ fn unix_path_to_wine(path: &Path) -> String {
     format!("Z:{}", path.display()).replace('/', "\\")
 }
 
-fn wait_for_bridge(port: u16, stopping: &AtomicBool) -> Result<()> {
+fn wait_for_bridge(
+    port: u16,
+    backend_status: &Path,
+    bridge: &mut ManagedChild,
+    stopping: &AtomicBool,
+) -> Result<()> {
     // The first RemoteDesktop portal grant is intentionally interactive.
-    // Keep the supervisor alive while the user chooses a monitor instead of
-    // treating a two-second consent delay as a bridge failure.
-    for _ in 0..6000 {
+    // Keep the supervisor alive while the user chooses a monitor. Portal
+    // consent has no useful deadline; process liveness and the stop signal
+    // still distinguish a pending choice from a failed startup.
+    loop {
         if stopping.load(Ordering::Relaxed) {
             anyhow::bail!("session startup cancelled");
         }
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        bridge.ensure_running("input bridge")?;
+        if std::fs::metadata(backend_status).is_ok_and(|metadata| metadata.len() > 0)
+            && std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+        {
+            // An old bridge can remain reachable for a few milliseconds while
+            // systemd replaces the session. Ensure this invocation survived
+            // its own bind before accepting the socket as ready.
+            thread::sleep(std::time::Duration::from_millis(50));
+            bridge.ensure_running("input bridge")?;
             return Ok(());
         }
         thread::sleep(std::time::Duration::from_millis(20));
     }
-    anyhow::bail!("input bridge did not become ready")
 }
 
 fn wait_for_runtime_file(path: &Path, stopping: &AtomicBool) -> Result<()> {
