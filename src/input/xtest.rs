@@ -1,19 +1,138 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
+use std::ffi::CStr;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, Keycode};
-use x11rb::protocol::xtest::ConnectionExt as XtestExt;
 use x11rb::rust_connection::RustConnection;
 
 use super::InputBackend;
 
-const FAKE_KEY_PRESS: u8 = 2;
-const FAKE_KEY_RELEASE: u8 = 3;
-const FAKE_BUTTON_PRESS: u8 = 4;
-const FAKE_BUTTON_RELEASE: u8 = 5;
-const FAKE_MOTION: u8 = 6;
-/// XTEST detail for motion: 0 = absolute, 1 = relative.
-const MOTION_RELATIVE: u8 = 1;
+type Handle = *mut libc::c_void;
+
+struct Library(Handle);
+
+impl Drop for Library {
+    fn drop(&mut self) {
+        unsafe { libc::dlclose(self.0) };
+    }
+}
+
+struct XlibInjector {
+    display: Handle,
+    close_display: unsafe extern "C" fn(Handle) -> libc::c_int,
+    flush: unsafe extern "C" fn(Handle) -> libc::c_int,
+    warp_pointer: unsafe extern "C" fn(
+        Handle,
+        libc::c_ulong,
+        libc::c_ulong,
+        libc::c_int,
+        libc::c_int,
+        libc::c_uint,
+        libc::c_uint,
+        libc::c_int,
+        libc::c_int,
+    ) -> libc::c_int,
+    fake_key: unsafe extern "C" fn(Handle, libc::c_uint, libc::c_int, libc::c_ulong) -> libc::c_int,
+    fake_button:
+        unsafe extern "C" fn(Handle, libc::c_uint, libc::c_int, libc::c_ulong) -> libc::c_int,
+    fake_relative_motion:
+        unsafe extern "C" fn(Handle, libc::c_int, libc::c_int, libc::c_ulong) -> libc::c_int,
+    _xtst: Library,
+    _x11: Library,
+}
+
+// The bridge's shared-input mutex serializes access to this Display. Xlib is
+// initialized for threads as well because successive events can be handled by
+// different connection workers.
+unsafe impl Send for XlibInjector {}
+
+impl XlibInjector {
+    fn connect() -> Result<Self> {
+        unsafe fn open(name: &CStr) -> Result<Library> {
+            let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            if handle.is_null() {
+                anyhow::bail!("{} is not available", name.to_string_lossy());
+            }
+            Ok(Library(handle))
+        }
+
+        unsafe fn symbol<T: Copy>(library: &Library, name: &CStr) -> Result<T> {
+            let pointer = unsafe { libc::dlsym(library.0, name.as_ptr()) };
+            if pointer.is_null() {
+                anyhow::bail!("missing native symbol {}", name.to_string_lossy());
+            }
+            // The requested types below exactly match the public Xlib/XTest C ABI.
+            Ok(unsafe { std::mem::transmute_copy::<Handle, T>(&pointer) })
+        }
+
+        let x11 = unsafe { open(c"libX11.so.6")? };
+        let open_display: unsafe extern "C" fn(*const libc::c_char) -> Handle =
+            unsafe { symbol(&x11, c"XOpenDisplay")? };
+        let init_threads: unsafe extern "C" fn() -> libc::c_int =
+            unsafe { symbol(&x11, c"XInitThreads")? };
+        let close_display = unsafe { symbol(&x11, c"XCloseDisplay")? };
+        let flush = unsafe { symbol(&x11, c"XFlush")? };
+        let warp_pointer = unsafe { symbol(&x11, c"XWarpPointer")? };
+        if unsafe { init_threads() } == 0 {
+            anyhow::bail!("XInitThreads failed");
+        }
+        let xtst = unsafe { open(c"libXtst.so.6")? };
+        let fake_key = unsafe { symbol(&xtst, c"XTestFakeKeyEvent")? };
+        let fake_button = unsafe { symbol(&xtst, c"XTestFakeButtonEvent")? };
+        let fake_relative_motion = unsafe { symbol(&xtst, c"XTestFakeRelativeMotionEvent")? };
+        let display = unsafe { open_display(std::ptr::null()) };
+        if display.is_null() {
+            anyhow::bail!("XOpenDisplay failed");
+        }
+        Ok(Self {
+            display,
+            close_display,
+            flush,
+            warp_pointer,
+            fake_key,
+            fake_button,
+            fake_relative_motion,
+            _xtst: xtst,
+            _x11: x11,
+        })
+    }
+
+    fn key(&self, keycode: u8, down: bool) -> Result<()> {
+        let result = unsafe { (self.fake_key)(self.display, keycode.into(), down.into(), 0) };
+        self.finish(result, "XTestFakeKeyEvent")
+    }
+
+    fn button(&self, button: u8, down: bool) -> Result<()> {
+        let result = unsafe { (self.fake_button)(self.display, button.into(), down.into(), 0) };
+        self.finish(result, "XTestFakeButtonEvent")
+    }
+
+    fn relative_motion(&self, x: i32, y: i32) -> Result<()> {
+        let result = unsafe { (self.fake_relative_motion)(self.display, x, y, 0) };
+        self.finish(result, "XTestFakeRelativeMotionEvent")
+    }
+
+    fn absolute_motion(&self, root: u32, x: i32, y: i32) {
+        unsafe {
+            (self.warp_pointer)(self.display, 0, root.into(), 0, 0, 0, 0, x, y);
+            (self.flush)(self.display);
+        }
+    }
+
+    fn finish(&self, result: libc::c_int, operation: &'static str) -> Result<()> {
+        if result == 0 {
+            anyhow::bail!("{operation} failed");
+        }
+        unsafe { (self.flush)(self.display) };
+        Ok(())
+    }
+}
+
+impl Drop for XlibInjector {
+    fn drop(&mut self) {
+        unsafe { (self.close_display)(self.display) };
+    }
+}
 
 /// X11 XTest injection.  Works on every X11 session; on XWayland it reaches
 /// XWayland-native windows only, which is why the portal backend is
@@ -21,6 +140,7 @@ const MOTION_RELATIVE: u8 = 1;
 pub struct XtestBackend {
     conn: RustConnection,
     screen: usize,
+    injector: XlibInjector,
     held_keys: HashSet<Keycode>,
     held_buttons: HashSet<u8>,
     wheel: super::WheelAccumulator,
@@ -29,9 +149,11 @@ pub struct XtestBackend {
 impl XtestBackend {
     pub fn connect() -> Result<Self> {
         let (conn, screen) = x11rb::connect(None).context("connecting to X display")?;
+        let injector = XlibInjector::connect().context("initializing XTEST")?;
         Ok(Self {
             conn,
             screen,
+            injector,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
             wheel: super::WheelAccumulator::default(),
@@ -42,17 +164,9 @@ impl XtestBackend {
         self.conn.setup().roots[self.screen].root
     }
 
-    fn screen_size(&self) -> (i16, i16) {
+    fn screen_size(&self) -> (i32, i32) {
         let root = &self.conn.setup().roots[self.screen];
-        (root.width_in_pixels as i16, root.height_in_pixels as i16)
-    }
-
-    fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<()> {
-        self.conn
-            .xtest_fake_input(kind, detail, 0, self.root(), x, y, 0)
-            .context("XTestFakeInput")?;
-        self.conn.flush()?;
-        Ok(())
+        (root.width_in_pixels.into(), root.height_in_pixels.into())
     }
 }
 
@@ -63,16 +177,7 @@ impl InputBackend for XtestBackend {
 
     fn key(&mut self, vkey: u16, down: bool) -> Result<()> {
         let keycode = self.vkey_to_keycode(vkey)?;
-        self.fake(
-            if down {
-                FAKE_KEY_PRESS
-            } else {
-                FAKE_KEY_RELEASE
-            },
-            keycode,
-            0,
-            0,
-        )?;
+        self.injector.key(keycode, down)?;
         if down {
             self.held_keys.insert(keycode);
         } else {
@@ -90,16 +195,7 @@ impl InputBackend for XtestBackend {
             9 => 9,
             _ => anyhow::bail!("unsupported pointer button {button}"),
         };
-        self.fake(
-            if down {
-                FAKE_BUTTON_PRESS
-            } else {
-                FAKE_BUTTON_RELEASE
-            },
-            button as u8,
-            0,
-            0,
-        )?;
+        self.injector.button(button as u8, down)?;
         if down {
             self.held_buttons.insert(button as u8);
         } else {
@@ -111,17 +207,17 @@ impl InputBackend for XtestBackend {
     fn motion(&mut self, absolute: bool, x: i32, y: i32) -> Result<()> {
         if absolute {
             let (width, height) = self.screen_size();
-            let clamped_x = ((x.clamp(0, 65535) as i64 * (width as i64 - 1)) / 65535) as i16;
-            let clamped_y = ((y.clamp(0, 65535) as i64 * (height as i64 - 1)) / 65535) as i16;
+            let clamped_x = ((x.clamp(0, 65535) as i64 * (width as i64 - 1)) / 65535) as i32;
+            let clamped_y = ((y.clamp(0, 65535) as i64 * (height as i64 - 1)) / 65535) as i32;
             // Xwayland accepts a core pointer warp for the complete desktop,
             // but ignores XTest absolute-motion events. Coordinates have
             // already been normalized across the selected monitor layout.
-            self.conn
-                .warp_pointer(x11rb::NONE, self.root(), 0, 0, 0, 0, clamped_x, clamped_y)
-                .context("XWarpPointer")?;
-            self.conn.flush()?;
+            // Use the same Xlib connection as subsequent buttons so the X
+            // server cannot reorder a click ahead of its target position.
+            self.injector
+                .absolute_motion(self.root(), clamped_x, clamped_y);
         } else {
-            self.fake(FAKE_MOTION, MOTION_RELATIVE, x as i16, y as i16)?;
+            self.injector.relative_motion(x, y)?;
         }
         Ok(())
     }
@@ -133,19 +229,19 @@ impl InputBackend for XtestBackend {
         let steps = self.wheel.steps(horizontal, delta);
         for _ in 0..steps.unsigned_abs() {
             let button = if steps > 0 { up_button } else { down_button };
-            self.fake(FAKE_BUTTON_PRESS, button, 0, 0)?;
-            self.fake(FAKE_BUTTON_RELEASE, button, 0, 0)?;
+            self.injector.button(button, true)?;
+            self.injector.button(button, false)?;
         }
         Ok(())
     }
 
     fn release_all(&mut self) -> Result<()> {
         for keycode in self.held_keys.clone() {
-            self.fake(FAKE_KEY_RELEASE, keycode, 0, 0)?;
+            self.injector.key(keycode, false)?;
         }
         self.held_keys.clear();
         for button in self.held_buttons.clone() {
-            self.fake(FAKE_BUTTON_RELEASE, button, 0, 0)?;
+            self.injector.button(button, false)?;
         }
         self.held_buttons.clear();
         self.conn.flush()?;
