@@ -672,9 +672,17 @@ static void draw_cursor_overlay(HDC hdc_dest, int x, int y, int width, int heigh
                                                  icon.hbmColor != NULL);
         shape.hotspot_x = (int)icon.xHotspot;
         shape.hotspot_y = (int)icon.yHotspot;
-        if (uur_map_cursor_overlay(&source, &destination, &shape, &overlay))
+        if (uur_map_cursor_overlay(&source, &destination, &shape, &overlay) &&
             DrawIconEx(hdc_dest, overlay.x, overlay.y, cursor.hCursor,
-                       overlay.width, overlay.height, 0, NULL, DI_NORMAL);
+                       overlay.width, overlay.height, 0, NULL, DI_NORMAL)) {
+            /* The fast capture path writes the next frame directly into the
+             * selected DIB's backing memory. Commit the GDI cursor draw before
+             * the client reads those pixels; otherwise it can remain queued
+             * until the next frame's pre-copy flush and then be overwritten
+             * immediately, making hit testing move while the remote cursor
+             * appears frozen. */
+            GdiFlush();
+        }
     }
     if (icon.hbmColor != NULL)
         DeleteObject(icon.hbmColor);
