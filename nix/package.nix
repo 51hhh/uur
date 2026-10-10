@@ -10,6 +10,8 @@
   pulseaudio,
   curl,
   glib,
+  libX11,
+  libXtst,
   wineWow64Packages,
   ethtool,
   networkmanager,
@@ -35,7 +37,11 @@ rustPlatform.buildRustPackage {
     windowsBinutils
     bash
   ];
-  buildInputs = [ pipewire ];
+  buildInputs = [
+    pipewire
+    libX11
+    libXtst
+  ];
 
   CC = "${stdenv.cc}/bin/cc";
   UUR_BUILD_SHELL = runtimeShell;
@@ -58,6 +64,10 @@ rustPlatform.buildRustPackage {
     UUR_BINARY=target/${stdenv.hostPlatform.rust.rustcTarget}/release/uur \
       ./packaging/stage.sh "$out" ""
     wrapProgram "$out/bin/uur" \
+      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [
+        libX11
+        libXtst
+      ]} \
       --prefix PATH : ${lib.makeBinPath [
         curl
         bash

@@ -21,6 +21,8 @@ overrides:
       - libc6
       - libgcc-s1
       - libglib2.0-bin
+      - libx11-6
+      - libxtst6
       - wine
       - curl
       - libpipewire-0.3-0
@@ -38,6 +40,8 @@ overrides:
       - glibc
       - libgcc
       - glib2
+      - libX11
+      - libXtst
       - wine
       - curl
       - pipewire-libs

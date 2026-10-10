@@ -105,7 +105,9 @@ cargo build --release --locked
 
 The source build needs Rust, a native C compiler, PipeWire development files,
 `pkg-config`, and the MinGW-w64 x86_64 compiler and binutils. Package names are
-distribution-specific; uur does not invoke a package manager itself.
+distribution-specific; uur does not invoke a package manager itself. Portable
+and source installations also need the `libX11.so.6` and `libXtst.so.6`
+runtimes for X11 and XWayland input.
 
 ### Immutable, declarative, and musl systems
 
