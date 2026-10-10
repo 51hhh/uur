@@ -24,6 +24,9 @@ pub struct Config {
     pub remote_desktop_restore_token: Option<String>,
     /// Portal source type: monitor, window, or virtual.
     pub capture_source: String,
+    /// Let an authenticated remote input event dismiss the GNOME screen
+    /// shield. Disabled by default because this bypasses the local lock prompt.
+    pub unlock_on_remote_input: bool,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             capture_restore_token: None,
             remote_desktop_restore_token: None,
             capture_source: "monitor".into(),
+            unlock_on_remote_input: false,
         }
     }
 }
@@ -158,5 +162,6 @@ input_backend = "auto"
         assert!(config.remote_desktop_restore_token.is_none());
         assert!(config.capture_restore_token.is_none());
         assert_eq!(config.capture_source, "monitor");
+        assert!(!config.unlock_on_remote_input);
     }
 }

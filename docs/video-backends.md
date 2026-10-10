@@ -45,8 +45,12 @@ When a desktop lock closes RemoteDesktop/EIS, uur waits for the screen shield
 to become inactive before spending the single-use restore token. Transient
 Portal errors never erase a persistent grant; an invalid token is handled by
 the Portal as required by its API. Remote input also requests monitor power-on
-through the desktop display service, waking a blanked display while leaving
-the lock screen and its authentication intact.
+through the desktop display service. The default policy wakes a blanked display
+while leaving the lock screen and its authentication intact. On GNOME, users
+can explicitly run `uur remote-unlock enable`; after the loopback bridge token
+is authenticated, the first remote input dismisses the screen shield so the
+portal capture and input sessions can reconnect. This policy skips local
+lock-screen authentication and remains disabled by default.
 When uur itself starts under an already locked graphical session, the bridge
 begins listening before Portal restoration. This removes the wake deadlock:
 the first authenticated remote input can power the monitors on even though

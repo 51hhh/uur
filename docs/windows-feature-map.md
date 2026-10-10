@@ -21,7 +21,7 @@ organized by host subsystem so each backend can evolve independently.
 | Privacy screen | Compositor output policy or a dedicated virtual output |
 | Wake-on-LAN | Physical NIC configuration and UU capability reporting |
 | Lock, reboot, shutdown, task manager | logind/Polkit and desktop-native actions |
-| Auto unlock and login-screen access | Display-manager remote session integration |
+| Auto unlock and login-screen access | Opt-in GNOME screen-shield dismissal for logged-in sessions; display-manager integration for pre-login access |
 | Controlled update | Official release feed and compatibility probes |
 
 The [App Store release history](https://apps.apple.com/hk/app/uu%E8%BF%9C%E7%A8%8B-%E8%BF%9C%E7%A8%8B%E5%8A%9E%E5%85%AC-%E6%B8%B8%E6%88%8F%E4%B8%B2%E6%B5%81/id1642306791?platform=mac)

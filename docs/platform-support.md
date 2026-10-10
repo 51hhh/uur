@@ -151,6 +151,15 @@ including fractional scaling and different monitor origins. Older portals or
 systems without libei use D-Bus notifications. Once EIS is connected, uur sends
 all input through EIS rather than mixing the two protocols in one session.
 
+GNOME deliberately closes these per-user portal sessions while its screen
+shield is active. By default, remote input powers on a blank display but keeps
+the lock screen. The explicit `uur remote-unlock enable` policy lets an input
+event that has passed the UU loopback bridge token check call GNOME's
+screen-shield API, after which the portal sessions reconnect. This skips the
+local lock-screen password, so it is disabled by default. It applies only to an
+already logged-in GNOME session; GDM and pre-login access require a
+display-manager remote session.
+
 ### Wayland session with a capture-only portal
 
 Requirements: ScreenCast/PipeWire plus writable `/dev/uinput` for full desktop

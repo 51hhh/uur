@@ -27,10 +27,13 @@ struct WakingBackend {
 }
 
 impl WakingBackend {
-    fn wrap(inner: impl InputBackend + 'static) -> Box<dyn InputBackend> {
+    fn wrap(
+        inner: impl InputBackend + 'static,
+        unlock_on_remote_input: bool,
+    ) -> Box<dyn InputBackend> {
         Box::new(Self {
             inner: Box::new(inner),
-            wake: wake::DisplayWake::new(),
+            wake: wake::DisplayWake::new(unlock_on_remote_input),
         })
     }
 }
@@ -70,19 +73,19 @@ impl InputBackend for WakingBackend {
 /// - Wayland sessions prefer the standard RemoteDesktop portal, then use the
 ///   kernel-level uinput device when the compositor only provides ScreenCast.
 /// - X11 sessions use XTEST, which needs no extra privileges.
-pub fn select(preferred: &str) -> Result<Box<dyn InputBackend>> {
+pub fn select(preferred: &str, unlock_on_remote_input: bool) -> Result<Box<dyn InputBackend>> {
     let on_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
     if preferred == "portal" || (preferred == "auto" && on_wayland) {
         match portal::PortalBackend::connect() {
-            Ok(backend) => return Ok(WakingBackend::wrap(backend)),
+            Ok(backend) => return Ok(WakingBackend::wrap(backend, unlock_on_remote_input)),
             Err(error) if preferred == "portal" => return Err(error),
             Err(error) => eprintln!("{}: {error}", t!("input.portal_unavailable")),
         }
     }
     if preferred == "uinput" || (preferred == "auto" && on_wayland) {
         match uinput::UinputBackend::connect() {
-            Ok(backend) => return Ok(WakingBackend::wrap(backend)),
+            Ok(backend) => return Ok(WakingBackend::wrap(backend, unlock_on_remote_input)),
             Err(error) if preferred == "uinput" => return Err(error),
             Err(error) => {
                 eprintln!("{}: {error}", t!("input.uinput_unavailable"));
@@ -91,7 +94,10 @@ pub fn select(preferred: &str) -> Result<Box<dyn InputBackend>> {
         }
     }
     if std::env::var("DISPLAY").is_ok() {
-        return Ok(WakingBackend::wrap(xtest::XtestBackend::connect()?));
+        return Ok(WakingBackend::wrap(
+            xtest::XtestBackend::connect()?,
+            unlock_on_remote_input,
+        ));
     }
     anyhow::bail!("{}", t!("input.no_display"));
 }

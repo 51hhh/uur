@@ -22,6 +22,7 @@ input:
   portal_unavailable: "当前会话中 Wayland Portal 输入不可用"
   no_display: "未检测到图形会话（DISPLAY 与 WAYLAND_DISPLAY 均未设置）"
   uinput_unavailable: "uinput 不可写 —— 回退到 XTEST（仅 XWayland 范围；请加载 uinput 模块或安装 udev 规则以获得完整覆盖）"
+  remote_unlock_requested: "已认证的远程输入已解除 GNOME 锁屏"
 
 bridge:
   listening: "输入桥监听于 127.0.0.1:%{port}"
@@ -92,3 +93,9 @@ wol:
 display:
   status: "Wayland 捕获源：%{source}"
   changed: "Wayland 捕获源已切换为 %{source}；下次运行时 Portal 会请求新的选择"
+
+remote_unlock:
+  enabled: "远程解锁已启用；重启 uur 会话后生效（已认证的远程输入将解除 GNOME 锁屏）"
+  disabled: "远程解锁已禁用；重启 uur 会话后生效"
+  status_enabled: "远程解锁已启用（已认证的远程输入会解除 GNOME 锁屏）"
+  status_disabled: "远程解锁未启用（GNOME 锁屏仍要求本地认证）"

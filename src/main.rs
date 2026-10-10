@@ -67,6 +67,11 @@ enum Command {
         #[command(subcommand)]
         action: WolAction,
     },
+    /// Manage opt-in GNOME unlock after authenticated remote input.
+    RemoteUnlock {
+        #[command(subcommand)]
+        action: RemoteUnlockAction,
+    },
     /// Select the portal capture source used on Wayland.
     Display {
         #[command(subcommand)]
@@ -133,6 +138,16 @@ enum WolAction {
 }
 
 #[derive(Subcommand)]
+enum RemoteUnlockAction {
+    /// Allow authenticated remote input to dismiss the GNOME lock screen.
+    Enable,
+    /// Keep the GNOME lock screen and its local authentication prompt.
+    Disable,
+    /// Report whether authenticated remote input may dismiss the lock screen.
+    Status,
+}
+
+#[derive(Subcommand)]
 enum DisplayAction {
     /// Show the configured source type.
     Status,
@@ -181,6 +196,32 @@ fn main() -> Result<()> {
             WolAction::Enable { interface } => wol::configure(interface.as_deref(), true),
             WolAction::Disable { interface } => wol::configure(interface.as_deref(), false),
         },
+        Command::RemoteUnlock { action } => {
+            let mut config = config::Config::load()?;
+            match action {
+                RemoteUnlockAction::Enable => {
+                    config.unlock_on_remote_input = true;
+                    config.store()?;
+                    println!("{}", t!("remote_unlock.enabled"));
+                    Ok(())
+                }
+                RemoteUnlockAction::Disable => {
+                    config.unlock_on_remote_input = false;
+                    config.store()?;
+                    println!("{}", t!("remote_unlock.disabled"));
+                    Ok(())
+                }
+                RemoteUnlockAction::Status => {
+                    let key = if config.unlock_on_remote_input {
+                        "remote_unlock.status_enabled"
+                    } else {
+                        "remote_unlock.status_disabled"
+                    };
+                    println!("{}", t!(key));
+                    Ok(())
+                }
+            }
+        }
         Command::Display { action } => {
             let mut config = config::Config::load()?;
             match action {

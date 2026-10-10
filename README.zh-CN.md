@@ -144,6 +144,7 @@ uur upstream check      # 检查网易官方版本
 uur autostart enable    # 可选：图形会话登录后自动启动
 uur autostart disable   # 删除受管登录自启动项
 uur wol status          # 检查有线 WOL 或 Wi-Fi WoWLAN 状态
+uur remote-unlock status # 查看可选的 GNOME 远程解锁策略
 uur display status      # 查看显示器、窗口或 Portal 虚拟源设置
 uur display source virtual
 uur stop                # 只停止 uur 助手与专用 Wine 前缀
@@ -165,6 +166,11 @@ UUR_INPUT_BACKEND=xtest uur run
 ```
 
 排错结束后应恢复默认的 `auto` 模式。
+
+GNOME 锁屏时会关闭当前用户的 ScreenCast 与 RemoteDesktop Portal 会话。执行
+`uur remote-unlock enable` 后，UU 本机桥通过令牌认证并收到第一条远程输入时，会解除
+GNOME 锁屏，让画面与控制会话重新连接。该选项默认关闭，因为它会跳过本地锁屏密码；
+执行 `uur remote-unlock disable` 可恢复默认行为。它不能在登录前控制 GDM。
 
 ## 🖥️ 桌面集成
 

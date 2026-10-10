@@ -65,10 +65,10 @@ impl DesktopControl {
         .ok()
     }
 
-    /// Wake a powered-down display without deactivating or bypassing the lock
-    /// screen. Mutter exposes its monitor power state directly; other desktops
-    /// can implement the standard ScreenSaver user-activity method.
-    async fn wake_display(&self) -> Result<()> {
+    /// Wake a powered-down display. Mutter exposes its monitor power state
+    /// directly; other desktops can implement the standard ScreenSaver
+    /// user-activity method.
+    async fn wake_monitors(&self) -> Result<()> {
         if let Ok(proxy) = Proxy::new(
             &self.connection,
             MUTTER_DISPLAY_SERVICE,
@@ -96,6 +96,46 @@ impl DesktopControl {
             .context("requesting display wake")?;
         Ok(())
     }
+
+    /// Dismiss GNOME's screen shield only for the explicit remote-unlock
+    /// option. This method is reached from authenticated bridge input, after
+    /// the per-install loopback token has already been verified.
+    async fn unlock_gnome_screen(&self) -> Result<()> {
+        if !self
+            .screen_saver_active_at(
+                GNOME_SCREENSAVER_SERVICE,
+                GNOME_SCREENSAVER_PATH,
+                GNOME_SCREENSAVER_INTERFACE,
+            )
+            .await
+            .context("querying the GNOME lock screen")?
+        {
+            return Ok(());
+        }
+
+        let proxy = Proxy::new(
+            &self.connection,
+            GNOME_SCREENSAVER_SERVICE,
+            GNOME_SCREENSAVER_PATH,
+            GNOME_SCREENSAVER_INTERFACE,
+        )
+        .await
+        .context("connecting to the GNOME lock screen")?;
+        let _: () = proxy
+            .call("SetActive", &(false,))
+            .await
+            .context("dismissing the GNOME lock screen")?;
+        eprintln!("{}", t!("input.remote_unlock_requested"));
+        Ok(())
+    }
+
+    async fn wake_display(&self, unlock_on_remote_input: bool) -> Result<()> {
+        let wake_result = self.wake_monitors().await;
+        if unlock_on_remote_input {
+            self.unlock_gnome_screen().await?;
+        }
+        wake_result
+    }
 }
 
 /// Non-blocking, rate-limited wake requests from the synchronous bridge.
@@ -106,7 +146,7 @@ pub(super) struct DisplayWake {
 }
 
 impl DisplayWake {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(unlock_on_remote_input: bool) -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
             .name("uur-display-wake".into())
@@ -129,7 +169,7 @@ impl DisplayWake {
                     }
                     let result = control.as_ref().map_or_else(
                         || Err(anyhow::anyhow!("desktop session bus is unavailable")),
-                        |desktop| runtime.block_on(desktop.wake_display()),
+                        |desktop| runtime.block_on(desktop.wake_display(unlock_on_remote_input)),
                     );
                     if let Err(error) = result {
                         control = None;
@@ -176,7 +216,7 @@ mod tests {
         runtime.block_on(async {
             let desktop = DesktopControl::connect().await.unwrap();
             assert!(desktop.screen_saver_active().await.is_some());
-            desktop.wake_display().await.unwrap();
+            desktop.wake_display(false).await.unwrap();
         });
     }
 }

@@ -135,7 +135,7 @@ pub fn serve() -> Result<()> {
     let config = Config::load()?;
     let preferred =
         std::env::var("UUR_INPUT_BACKEND").unwrap_or_else(|_| config.input_backend.clone());
-    let selected = input::select(&preferred)?;
+    let selected = input::select(&preferred, config.unlock_on_remote_input)?;
     if let Some(path) = std::env::var_os("UUR_BACKEND_STATUS") {
         std::fs::write(path, selected.name()).context("writing backend status")?;
     }

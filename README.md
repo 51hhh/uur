@@ -149,6 +149,7 @@ uur upstream check      # Check the official NetEase release feed
 uur autostart enable    # Optional: start after graphical login
 uur autostart disable   # Remove the managed login entry
 uur wol status          # Inspect wired WOL or Wi-Fi WoWLAN state
+uur remote-unlock status # Inspect the optional GNOME remote-unlock policy
 uur display status      # Monitor, window, or portal virtual source
 uur display source virtual
 uur stop                # Stop only uur's helpers and Wine prefix
@@ -173,6 +174,13 @@ UUR_INPUT_BACKEND=xtest uur run
 ```
 
 Use the default `auto` mode after troubleshooting.
+
+GNOME closes per-user ScreenCast and RemoteDesktop portal sessions while its
+lock screen is active. `uur remote-unlock enable` lets the first input event
+from UU's authenticated loopback bridge dismiss that lock screen so capture
+and control can reconnect. This option is disabled by default because it skips
+the local lock-screen password. Use `uur remote-unlock disable` to restore the
+default behavior. It does not provide pre-login or GDM access.
 
 ## 🖥️ Desktop integration
 

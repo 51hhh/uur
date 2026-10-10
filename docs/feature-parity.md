@@ -22,6 +22,7 @@
 | System proxy | available | Standard proxy environment → Wine WinINet settings |
 | Login autostart | available | User-controlled XDG autostart entry |
 | Wake-on-LAN host setup | available | Physical-interface discovery → wired WOL or Wi-Fi WoWLAN configuration |
+| Remote unlock after GNOME lock | opt-in | Authenticated UU bridge input → GNOME screen-shield dismissal → Portal reconnection |
 | Wake button in UU cloud UI | planned | Stable server capability API integration |
 | VA-API capability | detected | DRM render nodes + `vainfo` |
 | Vulkan Video capability | detected | Vulkan device and `VK_KHR_video_queue` |

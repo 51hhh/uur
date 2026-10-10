@@ -22,6 +22,7 @@ input:
   portal_unavailable: "Wayland portal input is not available in this session"
   no_display: "no graphical session detected (DISPLAY and WAYLAND_DISPLAY are unset)"
   uinput_unavailable: "uinput not writable — falling back to XTEST (XWayland scope only; load the uinput module or add the udev rule for full coverage)"
+  remote_unlock_requested: "authenticated remote input dismissed the GNOME lock screen"
 
 bridge:
   listening: "input bridge listening on 127.0.0.1:%{port}"
@@ -92,3 +93,9 @@ wol:
 display:
   status: "Wayland capture source: %{source}"
   changed: "Wayland capture source changed to %{source}; the portal will ask for a new selection on the next run"
+
+remote_unlock:
+  enabled: "remote unlock enabled; restart the uur session to apply it (authenticated remote input will dismiss the GNOME lock screen)"
+  disabled: "remote unlock disabled; restart the uur session to apply it"
+  status_enabled: "remote unlock is enabled (authenticated remote input dismisses the GNOME lock screen)"
+  status_disabled: "remote unlock is disabled (the GNOME lock screen still requires local authentication)"
