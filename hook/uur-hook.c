@@ -961,9 +961,15 @@ static BOOL feed_capture_frame(HDC hdc_dest, int x, int y, int width,
     return result;
 }
 
-static BOOL try_capture_feed(HDC hdc_dest, int x, int y, DWORD rop,
-                             HDC hdc_src, int width, int height, int source_x,
-                             int source_y, int source_width, int source_height)
+enum capture_feed_result {
+    CAPTURE_FEED_NOT_HANDLED = 0,
+    CAPTURE_FEED_FRAME = 1,
+    CAPTURE_FEED_UNAVAILABLE = 2,
+};
+
+static enum capture_feed_result try_capture_feed(
+    HDC hdc_dest, int x, int y, DWORD rop, HDC hdc_src, int width, int height,
+    int source_x, int source_y, int source_width, int source_height)
 {
     InterlockedIncrement(&capture_calls);
     /* The client's desktop capture is an SRCCOPY blit whose source is the
@@ -973,7 +979,7 @@ static BOOL try_capture_feed(HDC hdc_dest, int x, int y, DWORD rop,
         if (feed_capture_frame(hdc_dest, x, y, width, height, source_x,
                                source_y, source_width, source_height)) {
             InterlockedIncrement(&capture_rendered);
-            return TRUE;
+            return CAPTURE_FEED_FRAME;
         }
         /* XWayland cannot provide a current Wayland desktop after Portal
          * disconnects. Publish an empty frame while it reconnects instead of
@@ -997,21 +1003,25 @@ static BOOL try_capture_feed(HDC hdc_dest, int x, int y, DWORD rop,
             InterlockedIncrement(&capture_unavailable);
             BOOL cleared = PatBlt(hdc_dest, x, y, width, height, BLACKNESS);
             GdiFlush();
-            return cleared;
+            return cleared ? CAPTURE_FEED_UNAVAILABLE
+                           : CAPTURE_FEED_NOT_HANDLED;
         }
     }
     InterlockedIncrement(&capture_fallbacks);
-    return FALSE;
+    return CAPTURE_FEED_NOT_HANDLED;
 }
 
 BOOL WINAPI hook_bit_blt(HDC hdc_dest, int x, int y, int width, int height,
                          HDC hdc_src, int x_src, int y_src, DWORD rop)
 {
     BOOL result;
-    if (try_capture_feed(hdc_dest, x, y, rop, hdc_src, width, height, x_src,
-                         y_src, width, height)) {
-        draw_cursor_overlay(hdc_dest, x, y, width, height, x_src, y_src,
-                            width, height);
+    enum capture_feed_result feed = try_capture_feed(
+        hdc_dest, x, y, rop, hdc_src, width, height, x_src, y_src, width,
+        height);
+    if (feed != CAPTURE_FEED_NOT_HANDLED) {
+        if (feed == CAPTURE_FEED_FRAME)
+            draw_cursor_overlay(hdc_dest, x, y, width, height, x_src, y_src,
+                                width, height);
         return TRUE;
     }
     result = original_bit_blt(hdc_dest, x, y, width, height, hdc_src, x_src,
@@ -1028,9 +1038,11 @@ BOOL WINAPI hook_stretch_blt(HDC hdc_dest, int x, int y, int w, int h,
                              DWORD rop)
 {
     BOOL result;
-    if (try_capture_feed(hdc_dest, x, y, rop, hdc_src, w, h, xs, ys, sw,
-                         sh)) {
-        draw_cursor_overlay(hdc_dest, x, y, w, h, xs, ys, sw, sh);
+    enum capture_feed_result feed = try_capture_feed(
+        hdc_dest, x, y, rop, hdc_src, w, h, xs, ys, sw, sh);
+    if (feed != CAPTURE_FEED_NOT_HANDLED) {
+        if (feed == CAPTURE_FEED_FRAME)
+            draw_cursor_overlay(hdc_dest, x, y, w, h, xs, ys, sw, sh);
         return TRUE;
     }
     result = original_stretch_blt(hdc_dest, x, y, w, h, hdc_src, xs, ys, sw,
