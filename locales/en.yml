@@ -48,6 +48,10 @@ capture:
 
 session:
   already_running: "a session is already running - use it, or run `uur stop` first"
+  already_running_pid: "a session is already running (supervisor PID %{pid}); use it, or run `uur stop` first"
+  started_background: "uur started in the background (supervisor PID %{pid}); log: %{path}"
+  background_failed: "the background supervisor exited during startup (%{status}); see %{path}"
+  background_timeout: "the background supervisor did not acquire its session lock; see %{path}"
   server_running: "GameViewerServer is running"
   launching_client: "starting the managed client (capture and bridge are live)"
   client_exited: "client exited (code %{code}); session ended"

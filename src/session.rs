@@ -402,7 +402,94 @@ impl Drop for SessionResources {
     }
 }
 
-/// Start everything and block until the client exits.
+/// Start the foreground supervisor in a new session and return after its
+/// single-instance lock confirms that startup has begun. Standard streams are
+/// redirected so closing the invoking terminal cannot stop the managed
+/// session.
+pub fn launch() -> Result<()> {
+    // Older autostart units used `ExecStart=uur run`. Preserve their service
+    // manager contract across package upgrades: only the exact process named
+    // by systemd stays in the foreground. An inherited SYSTEMD_EXEC_PID from a
+    // terminal or desktop scope does not match this child process.
+    let systemd_exec_pid = std::env::var("SYSTEMD_EXEC_PID").ok();
+    if process_is_systemd_exec(systemd_exec_pid.as_deref(), std::process::id()) {
+        return start();
+    }
+
+    if let Some((pid, _)) = live_session_identity()? {
+        println!("{}", t!("session.already_running_pid", pid = pid));
+        return Ok(());
+    }
+
+    let executable = std::env::current_exe().context("resolving uur executable")?;
+    let log_path = state_dir().join("supervisor.log");
+    std::fs::create_dir_all(state_dir()).context("creating state directory")?;
+    let log = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+        .with_context(|| format!("opening {}", log_path.display()))?;
+
+    let mut command = Command::new(executable);
+    command
+        .arg("__run")
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log));
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command.spawn().context("starting the uur supervisor")?;
+    let pid = child.id();
+    let start = process_start_time(pid).context("reading the uur supervisor identity")?;
+    for _ in 0..250 {
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!(
+                "{}",
+                t!(
+                    "session.background_failed",
+                    status = status.to_string(),
+                    path = log_path.display().to_string()
+                )
+            );
+        }
+        if read_session_identity()? == Some((pid, start)) {
+            println!(
+                "{}",
+                t!(
+                    "session.started_background",
+                    pid = pid,
+                    path = log_path.display().to_string()
+                )
+            );
+            return Ok(());
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    anyhow::bail!(
+        "{}",
+        t!(
+            "session.background_timeout",
+            path = log_path.display().to_string()
+        )
+    )
+}
+
+/// Start everything in the foreground and block until the client exits. The
+/// public `run` command detaches this supervisor; service managers invoke it
+/// directly through the hidden `__run` entry point.
 pub fn start() -> Result<()> {
     let _session_lock = acquire_session_lock()?;
     rotate_session_log();
@@ -746,6 +833,17 @@ fn read_session_identity() -> Result<Option<(u32, u64)>> {
     Ok(Some((pid, start)))
 }
 
+fn live_session_identity() -> Result<Option<(u32, u64)>> {
+    let Some((pid, start)) = read_session_identity()? else {
+        return Ok(None);
+    };
+    Ok((process_start_time(pid).ok() == Some(start)).then_some((pid, start)))
+}
+
+fn process_is_systemd_exec(systemd_exec_pid: Option<&str>, pid: u32) -> bool {
+    systemd_exec_pid.and_then(|value| value.parse::<u32>().ok()) == Some(pid)
+}
+
 fn process_start_time(pid: u32) -> Result<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let end = stat.rfind(") ").context("malformed /proc stat")?;
@@ -1068,6 +1166,14 @@ mod tests {
     #[test]
     fn current_process_identity_is_readable() {
         assert!(process_start_time(std::process::id()).unwrap() > 0);
+    }
+
+    #[test]
+    fn only_the_exact_systemd_exec_pid_keeps_run_in_the_foreground() {
+        assert!(process_is_systemd_exec(Some("1234"), 1234));
+        assert!(!process_is_systemd_exec(Some("1234"), 1235));
+        assert!(!process_is_systemd_exec(Some("invalid"), 1234));
+        assert!(!process_is_systemd_exec(None, 1234));
     }
 
     #[test]

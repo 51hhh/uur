@@ -55,8 +55,9 @@ surface.
 
 ## Lifetime and isolation
 
-`uur run` is the only supervisor. It creates each native helper in a dedicated
-process group and records the supervisor PID plus Linux process start time.
+`uur run` launches the hidden foreground supervisor as a detached process and
+returns after startup is confirmed. The supervisor creates each native helper
+in a dedicated process group and records its PID plus Linux process start time.
 When the UU UI exits, or when `uur stop` sends SIGTERM to that exact supervisor,
 RAII cleanup terminates only those helper groups and the one managed Wine
 prefix. There are no permanent daemons, global `pkill` calls, or required

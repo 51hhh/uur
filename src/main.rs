@@ -92,6 +92,9 @@ enum Command {
     /// Internal desktop suspend/idle inhibitor. Not part of the public CLI.
     #[command(hide = true, name = "__inhibit")]
     InternalInhibit,
+    /// Internal foreground session supervisor. Not part of the public CLI.
+    #[command(hide = true, name = "__run")]
+    InternalRun,
     /// Internal authenticated XDG application launcher.
     #[command(hide = true, name = "__launcher")]
     InternalLauncher,
@@ -184,7 +187,7 @@ fn main() -> Result<()> {
         Command::Doctor => doctor::report(),
         Command::Pointer => bridge::print_pointer(),
         Command::Capture => capture::run(),
-        Command::Run => session::start(),
+        Command::Run => session::launch(),
         Command::Stop => session::stop(),
         Command::Autostart { action } => match action {
             AutostartAction::Enable => autostart::enable(),
@@ -244,6 +247,7 @@ fn main() -> Result<()> {
         Command::InternalTerminal => terminal::serve(),
         Command::InternalWallpaper => wallpaper::serve(),
         Command::InternalInhibit => inhibit::serve(),
+        Command::InternalRun => session::start(),
         Command::InternalLauncher => launcher::serve(),
         Command::Upstream {
             action: UpstreamAction::Check,

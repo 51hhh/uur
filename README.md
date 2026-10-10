@@ -143,7 +143,7 @@ immutable systems, and libc boundaries.
 ## 🧭 Daily use
 
 ```bash
-uur run                 # Start or show the managed UU session
+uur run                 # Start the managed UU session in the background
 uur doctor              # Read-only environment diagnostics
 uur upstream check      # Check the official NetEase release feed
 uur autostart enable    # Optional: start after graphical login
@@ -162,8 +162,8 @@ display outputs, so the remote client can switch screens or request both. Run
 set of displays.
 
 If UU was started from the desktop, choose **Quit** from the launcher's
-application actions. When running from a terminal, use `uur stop` or press
-Ctrl+C.
+application actions. When running from a terminal, use `uur stop`. Ctrl+C
+applies only when diagnosing the internal foreground supervisor.
 
 Diagnostic input overrides:
 

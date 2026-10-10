@@ -138,7 +138,7 @@ OpenMandriva、PCLinuxOS、Venom Linux、Guix System 等软件包生态可以使
 ## 🧭 日常使用
 
 ```bash
-uur run                 # 启动或显示受管 UU 会话
+uur run                 # 在后台启动受管 UU 会话并立即返回
 uur doctor              # 只读环境诊断
 uur upstream check      # 检查网易官方版本
 uur autostart enable    # 可选：图形会话登录后自动启动
@@ -155,7 +155,7 @@ uur stop                # 只停止 uur 助手与专用 Wine 前缀
 再次执行 `uur display source monitor` 以清除旧授权。
 
 从桌面启动 UU 后，可在启动器的应用操作菜单中选择“退出”；从终端运行时可执行
-`uur stop` 或按 Ctrl+C。
+`uur stop`。只有诊断内部前台监督进程时才需要按 Ctrl+C。
 
 输入后端排错：
 

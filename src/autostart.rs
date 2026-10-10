@@ -111,7 +111,7 @@ fn systemd_unit(executable: &Path) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={executable} run\n\
+         ExecStart={executable} __run\n\
          Restart=on-failure\n\
          RestartSec=5s\n\
          TimeoutStopSec=30s\n\
@@ -194,6 +194,6 @@ mod tests {
         let unit = systemd_unit(Path::new("/opt/UU % Remote/uur"));
         assert!(unit.contains("PartOf=graphical-session.target"));
         assert!(unit.contains("WantedBy=graphical-session.target"));
-        assert!(unit.contains("ExecStart=\"/opt/UU %% Remote/uur\" run"));
+        assert!(unit.contains("ExecStart=\"/opt/UU %% Remote/uur\" __run"));
     }
 }
