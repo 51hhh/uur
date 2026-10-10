@@ -62,7 +62,7 @@ enum Command {
         #[command(subcommand)]
         action: AutostartAction,
     },
-    /// Inspect or configure host Wake-on-LAN.
+    /// Inspect or configure wired Wake-on-LAN or Wi-Fi WoWLAN.
     Wol {
         #[command(subcommand)]
         action: WolAction,
@@ -115,7 +115,7 @@ enum AutostartAction {
 
 #[derive(Subcommand)]
 enum WolAction {
-    /// Report the selected physical wired adapter and Magic Packet state.
+    /// Report the selected physical adapter and Magic Packet state.
     Status {
         #[arg(long)]
         interface: Option<String>,

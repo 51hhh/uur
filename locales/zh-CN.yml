@@ -83,7 +83,7 @@ wol:
   connection: "NetworkManager 连接：%{connection}"
   yes: "是"
   no: "否"
-  unknown_ethtool: "未知（请安装 ethtool）"
+  unknown_ethtool: "未知（请安装 ethtool 或 iw）"
   unsupported: "%{interface} 未声明支持 Magic Packet 唤醒"
   verify_failed: "无法验证 %{interface} 的网络唤醒状态"
   enabled: "已在 %{interface} 上启用 Magic Packet 唤醒"

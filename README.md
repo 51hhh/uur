@@ -148,7 +148,7 @@ uur doctor              # Read-only environment diagnostics
 uur upstream check      # Check the official NetEase release feed
 uur autostart enable    # Optional: start after graphical login
 uur autostart disable   # Remove the managed login entry
-uur wol status          # Inspect the physical wired adapter's WOL state
+uur wol status          # Inspect wired WOL or Wi-Fi WoWLAN state
 uur display status      # Monitor, window, or portal virtual source
 uur display source virtual
 uur stop                # Stop only uur's helpers and Wine prefix
@@ -202,7 +202,7 @@ native Linux service adapters rather than being left inside the Wine prefix:
 | --- | --- |
 | Terminal | Authenticated UU transport → native PTY and the user's login shell |
 | Quick Launch | UU application inventory → authenticated XDG desktop activation |
-| Wake-on-LAN setup | `uur wol` → real wired interface and NetworkManager profile |
+| Wake-on-LAN setup | `uur wol` → wired WOL or Wi-Fi WoWLAN + NetworkManager profile |
 | Received files | Validated staging → the user's XDG Downloads directory |
 | Sending files | File portal or explicit CLI selection → bounded native staging |
 | Port mapping | Policy-controlled native TCP/UDP broker; loopback by default |

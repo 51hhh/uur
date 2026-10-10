@@ -233,8 +233,9 @@ that session. Cold-boot access therefore requires an already established user
 graphical session (for example, an intentionally configured automatic login)
 or the display manager's own remote-login service.
 
-The WOL command configures the real Linux adapter; it requires `ethtool`, and
-persists the setting through an active NetworkManager wired profile when one
+The WOL command configures the real Linux adapter. Wired interfaces use
+`ethtool`; Wi-Fi interfaces use the kernel's WoWLAN support. The setting is
+persisted through the active NetworkManager Ethernet or Wi-Fi profile when one
 exists. The adapter name above is only an example—omit it for automatic
 physical-interface selection.
 

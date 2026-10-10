@@ -83,7 +83,7 @@ wol:
   connection: "NetworkManager connection: %{connection}"
   yes: "yes"
   no: "no"
-  unknown_ethtool: "unknown (install ethtool)"
+  unknown_ethtool: "unknown (install ethtool or iw)"
   unsupported: "%{interface} does not advertise Magic Packet wake support"
   verify_failed: "Wake-on-LAN state could not be verified on %{interface}"
   enabled: "Magic Packet wake enabled on %{interface}"

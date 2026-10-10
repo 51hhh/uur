@@ -143,7 +143,7 @@ uur doctor              # 只读环境诊断
 uur upstream check      # 检查网易官方版本
 uur autostart enable    # 可选：图形会话登录后自动启动
 uur autostart disable   # 删除受管登录自启动项
-uur wol status          # 检查物理有线网卡的 WOL 状态
+uur wol status          # 检查有线 WOL 或 Wi-Fi WoWLAN 状态
 uur display status      # 查看显示器、窗口或 Portal 虚拟源设置
 uur display source virtual
 uur stop                # 只停止 uur 助手与专用 Wine 前缀
@@ -188,7 +188,7 @@ UUR_INPUT_BACKEND=xtest uur run
 | --- | --- |
 | 终端 | UU 鉴权通道 → 原生 PTY 与当前用户登录 Shell |
 | 快速启动 | UU 应用清单 → 带鉴权的 XDG 桌面应用激活 |
-| 网络唤醒配置 | `uur wol` → 真实有线网卡与 NetworkManager 配置 |
+| 网络唤醒配置 | `uur wol` → 有线 WOL 或 Wi-Fi WoWLAN 与 NetworkManager 配置 |
 | 接收文件 | 安全暂存与校验 → 用户 XDG 下载目录 |
 | 发送文件 | File Portal 或显式 CLI 选择 → 有界原生暂存区 |
 | 端口映射 | 带策略的原生 TCP/UDP broker，默认只绑定回环地址 |
