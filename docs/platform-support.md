@@ -220,6 +220,19 @@ uur wol status
 sudo uur wol enable --interface enp3s0
 ```
 
+On systemd desktops, autostart installs a user service tied to
+`graphical-session.target` and starts it immediately. Other desktops use an
+XDG autostart entry. The managed service remains alive across screen lock and
+display power-off; if it starts while the screen is already locked, its input
+bridge comes online first so remote activity can power the monitors on, then
+Portal capture and control resume after unlock.
+
+The display manager's pre-login screen is a different Wayland security
+session. A per-user ScreenCast/RemoteDesktop grant cannot capture or control
+that session. Cold-boot access therefore requires an already established user
+graphical session (for example, an intentionally configured automatic login)
+or the display manager's own remote-login service.
+
 The WOL command configures the real Linux adapter; it requires `ethtool`, and
 persists the setting through an active NetworkManager wired profile when one
 exists. The adapter name above is only an example—omit it for automatic
