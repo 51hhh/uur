@@ -41,6 +41,12 @@ expired input session closes the old session and negotiates a replacement
 using the saved Portal grant. Queued commands from the failed session are
 discarded; release events for inputs not held in the replacement session are
 ignored. The PE hook reconnects its loopback input bridge after a lost socket.
+When a desktop lock closes RemoteDesktop/EIS, uur waits for the screen shield
+to become inactive before spending the single-use restore token. Transient
+Portal errors never erase a persistent grant; an invalid token is handled by
+the Portal as required by its API. Remote input also requests monitor power-on
+through the desktop display service, waking a blanked display while leaving
+the lock screen and its authentication intact.
 Closing a capture session removes all its transports. A dead heartbeat remains
 rejected until it changes, including after the file is reopened. Wayland
 capture emits empty frames while the Portal is unavailable, rather than

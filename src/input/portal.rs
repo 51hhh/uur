@@ -284,17 +284,33 @@ async fn portal_worker(
     motion_queued: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut initialized = false;
-    let mut without_token = false;
+    let desktop = super::wake::DesktopControl::connect().await.ok();
+    let mut waiting_for_unlock = false;
     loop {
-        let token = if without_token {
-            None
-        } else if initialized {
+        let screen_locked = match &desktop {
+            Some(desktop) => desktop.screen_saver_active().await == Some(true),
+            None => false,
+        };
+        if screen_locked {
+            if !waiting_for_unlock {
+                eprintln!("screen is locked; preserving the Portal grant until unlock");
+                waiting_for_unlock = true;
+            }
+            if discard_pending_events(&mut receiver, &pending_motion, &motion_queued) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        if waiting_for_unlock {
+            eprintln!("screen unlocked; restoring the Portal session");
+            waiting_for_unlock = false;
+        }
+        let token = if initialized {
             crate::config::Config::load()?.remote_desktop_restore_token
         } else {
             restore_token.clone()
         };
-        let had_token = token.is_some();
-        let mut portal_started = false;
         match portal_session_worker(
             &mut receiver,
             &ready,
@@ -302,29 +318,20 @@ async fn portal_worker(
             &pending_motion,
             &motion_queued,
             &mut initialized,
-            &mut portal_started,
         )
         .await
         {
             Ok(()) => return Ok(()),
-            Err(error) if had_token && !portal_started => {
-                eprintln!("saved Portal grant failed: {error}; retrying without the restore token");
-                let mut config = crate::config::Config::load()?;
-                config.remote_desktop_restore_token = None;
-                config.store()?;
-                if discard_pending_events(&mut receiver, &pending_motion, &motion_queued) {
-                    return Ok(());
-                }
-                without_token = true;
-            }
             Err(error) if !initialized => return Err(error),
             Err(error) => {
                 eprintln!("portal session lost: {error}; reconnecting capture and input");
                 if discard_pending_events(&mut receiver, &pending_motion, &motion_queued) {
                     return Ok(());
                 }
-                without_token = false;
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                // Lock activation and Portal teardown race each other. Give the
+                // screen shield time to become observable before consuming the
+                // single-use restore token in a replacement session.
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
     }
@@ -365,9 +372,7 @@ async fn portal_session_worker(
     pending_motion: &Arc<Mutex<Option<Motion>>>,
     motion_queued: &Arc<AtomicBool>,
     initialized: &mut bool,
-    portal_started: &mut bool,
 ) -> Result<()> {
-    *portal_started = false;
     let portal = RemoteDesktop::new().await?;
     let screencast = Screencast::new().await?;
     let configured = crate::config::Config::load()?;
@@ -400,7 +405,6 @@ async fn portal_session_worker(
             .await?
             .response()?;
         let selection = portal.start(&session, None).await?.response()?;
-        *portal_started = true;
         // Start consumes the old restore token. Preserve its replacement even if
         // a later capture or EIS setup step fails.
         let token = selection.restore_token().map(ToOwned::to_owned);

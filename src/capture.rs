@@ -154,9 +154,10 @@ pub(crate) fn remove_frame_files(base: &std::path::Path) {
 }
 
 /// Open the portal session and return its PipeWire descriptor and streams.
-/// First attempt reuses the stored restore token; if that fails (stale
-/// token, monitor changed, compositor restart) fall back to one
-/// interactive attempt and store the fresh token.
+/// Reuse the stored restore token and let the Portal decide whether it is
+/// still valid. The specification requires an invalid token to be ignored and
+/// the chooser to be shown normally; retrying every transient failure without
+/// the token would turn a lock-screen interruption into repeated prompts.
 #[allow(clippy::type_complexity)]
 fn portal_session(config: &mut Config) -> Result<(OwnedFd, Vec<PortalStream>)> {
     // A combined RemoteDesktop session owns the same ScreenCast selection.
@@ -172,23 +173,14 @@ fn portal_session(config: &mut Config) -> Result<(OwnedFd, Vec<PortalStream>)> {
             .await
             .context("connecting to the ScreenCast portal")?;
 
-        let mut last_error = None;
         let source = source_type(&config.capture_source);
-        for token in [saved_token.clone(), None] {
-            match negotiate(&screencast, source, token.as_deref()).await {
-                Ok((fd, streams, fresh_token)) => {
-                    if fresh_token != config.capture_restore_token {
-                        config.capture_restore_token = fresh_token;
-                        config.store().context("storing the new restore token")?;
-                    }
-                    return Ok((fd, streams));
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                }
-            }
+        let (fd, streams, fresh_token) =
+            negotiate(&screencast, source, saved_token.as_deref()).await?;
+        if fresh_token != config.capture_restore_token {
+            config.capture_restore_token = fresh_token;
+            config.store().context("storing the new restore token")?;
         }
-        Err(last_error.unwrap_or_else(|| anyhow!("portal session failed")))
+        Ok((fd, streams))
     })
 }
 

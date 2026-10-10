@@ -1,6 +1,7 @@
 mod eis;
 pub mod portal;
 pub mod uinput;
+mod wake;
 pub mod xtest;
 
 use anyhow::Result;
@@ -20,6 +21,50 @@ pub trait InputBackend: Send {
     fn release_all(&mut self) -> Result<()>;
 }
 
+struct WakingBackend {
+    inner: Box<dyn InputBackend>,
+    wake: wake::DisplayWake,
+}
+
+impl WakingBackend {
+    fn wrap(inner: impl InputBackend + 'static) -> Box<dyn InputBackend> {
+        Box::new(Self {
+            inner: Box::new(inner),
+            wake: wake::DisplayWake::new(),
+        })
+    }
+}
+
+impl InputBackend for WakingBackend {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn key(&mut self, vkey: u16, down: bool) -> Result<()> {
+        self.wake.request();
+        self.inner.key(vkey, down)
+    }
+
+    fn button(&mut self, button: u16, down: bool) -> Result<()> {
+        self.wake.request();
+        self.inner.button(button, down)
+    }
+
+    fn motion(&mut self, absolute: bool, x: i32, y: i32) -> Result<()> {
+        self.wake.request();
+        self.inner.motion(absolute, x, y)
+    }
+
+    fn wheel(&mut self, horizontal: bool, delta: i32) -> Result<()> {
+        self.wake.request();
+        self.inner.wheel(horizontal, delta)
+    }
+
+    fn release_all(&mut self) -> Result<()> {
+        self.inner.release_all()
+    }
+}
+
 /// Choose the backend for this session:
 ///
 /// - Wayland sessions prefer the standard RemoteDesktop portal, then use the
@@ -30,14 +75,14 @@ pub fn select(preferred: &str) -> Result<Box<dyn InputBackend>> {
 
     if preferred == "portal" || (preferred == "auto" && on_wayland) {
         match portal::PortalBackend::connect() {
-            Ok(backend) => return Ok(Box::new(backend)),
+            Ok(backend) => return Ok(WakingBackend::wrap(backend)),
             Err(error) if preferred == "portal" => return Err(error),
             Err(error) => eprintln!("{}: {error}", t!("input.portal_unavailable")),
         }
     }
     if preferred == "uinput" || (preferred == "auto" && on_wayland) {
         match uinput::UinputBackend::connect() {
-            Ok(backend) => return Ok(Box::new(backend)),
+            Ok(backend) => return Ok(WakingBackend::wrap(backend)),
             Err(error) if preferred == "uinput" => return Err(error),
             Err(error) => {
                 eprintln!("{}: {error}", t!("input.uinput_unavailable"));
@@ -46,7 +91,7 @@ pub fn select(preferred: &str) -> Result<Box<dyn InputBackend>> {
         }
     }
     if std::env::var("DISPLAY").is_ok() {
-        return Ok(Box::new(xtest::XtestBackend::connect()?));
+        return Ok(WakingBackend::wrap(xtest::XtestBackend::connect()?));
     }
     anyhow::bail!("{}", t!("input.no_display"));
 }
