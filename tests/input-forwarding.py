@@ -48,7 +48,7 @@ result = subprocess.run(['xvfb-run', '-a', 'wine', './selftest.exe',
 worker.join(21)
 listener.close()
 assert not worker.is_alive(), 'mock bridge timed out'
-assert not failures, failures
+assert not failures, (failures, records, result.stdout, result.stderr)
 assert records[0] == (2, 0xffff, 0, 111, 77), records
 assert records[1][0:3] == (2, 0xffff, 1), records
 assert records[2] == (2, 1, 1, 0, 0), records

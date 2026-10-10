@@ -398,9 +398,10 @@ static int keyboard_forwarding_round_trip(void)
 static int input_forwarding_round_trip(void)
 {
     POINT before, after;
-    INPUT events[3];
     if (!GetCursorPos(&before))
         return 20;
+
+    INPUT events[3];
     ZeroMemory(events, sizeof(events));
     events[0].type = INPUT_MOUSE;
     events[0].mi.dwFlags = MOUSEEVENTF_MOVE;
@@ -439,6 +440,14 @@ static int input_forwarding_round_trip(void)
         fprintf(stderr, "forwarded mouse input was injected again by Wine\n");
         return 22;
     }
+    INPUT no_op;
+    ZeroMemory(&no_op, sizeof(no_op));
+    no_op.type = INPUT_MOUSE;
+    no_op.mi.dwFlags = MOUSEEVENTF_MOVE;
+    /* UU virtual mouse sends this Win32-side state update before every
+     * absolute position. It must stay on Wine's path and out of the bridge. */
+    if (SendInput(1, &no_op, sizeof(INPUT)) != 1)
+        return 20;
     int keyboard_result = keyboard_forwarding_round_trip();
     if (keyboard_result != 0)
         return keyboard_result;

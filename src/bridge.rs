@@ -272,6 +272,11 @@ fn dispatch(backend: &mut dyn input::InputBackend, record: &protocol::Record) ->
             const MOTION: u16 = 0xffff;
             const WHEEL: u16 = 0xfffe;
             match record.code {
+                // UU's virtual-mouse mode prefixes an absolute coordinate
+                // with a relative (0, 0). Older hooks may still send that
+                // no-op, so keep it from switching the compositor between
+                // the relative pointer and absolute tablet devices.
+                MOTION if record.state != 1 && record.a == 0 && record.b == 0 => {}
                 MOTION => backend.motion(record.state == 1, record.a, record.b)?,
                 WHEEL => backend.wheel(record.a != 0, record.b)?,
                 _ => backend.button(record.code, record.state == 1)?,
@@ -390,6 +395,37 @@ mod tests {
 
         assert_eq!(thread.join().unwrap(), 1);
         assert_eq!(events.try_iter().collect::<Vec<_>>(), ["key 65 true"]);
+    }
+
+    #[test]
+    fn zero_relative_motion_does_not_switch_input_devices() {
+        let (events_tx, events) = mpsc::channel();
+        let mut backend = Recorder(events_tx);
+        dispatch(
+            &mut backend,
+            &protocol::Record {
+                kind: protocol::RECORD_MOUSE,
+                code: 0xffff,
+                state: 0,
+                a: 0,
+                b: 0,
+            },
+        )
+        .unwrap();
+        assert!(events.try_recv().is_err());
+
+        dispatch(
+            &mut backend,
+            &protocol::Record {
+                kind: protocol::RECORD_MOUSE,
+                code: 0xffff,
+                state: 1,
+                a: 0,
+                b: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(events.try_recv().unwrap(), "motion");
     }
 
     #[test]

@@ -113,7 +113,13 @@ impl InputBackend for XtestBackend {
             let (width, height) = self.screen_size();
             let clamped_x = ((x.clamp(0, 65535) as i64 * (width as i64 - 1)) / 65535) as i16;
             let clamped_y = ((y.clamp(0, 65535) as i64 * (height as i64 - 1)) / 65535) as i16;
-            self.fake(FAKE_MOTION, 0, clamped_x, clamped_y)?;
+            // Xwayland accepts a core pointer warp for the complete desktop,
+            // but ignores XTest absolute-motion events. Coordinates have
+            // already been normalized across the selected monitor layout.
+            self.conn
+                .warp_pointer(x11rb::NONE, self.root(), 0, 0, 0, 0, clamped_x, clamped_y)
+                .context("XWarpPointer")?;
+            self.conn.flush()?;
         } else {
             self.fake(FAKE_MOTION, MOTION_RELATIVE, x as i16, y as i16)?;
         }

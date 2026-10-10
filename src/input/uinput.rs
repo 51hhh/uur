@@ -40,6 +40,12 @@ const BTN_MIDDLE: u16 = 0x112;
 const BTN_SIDE: u16 = linux::BTN_SIDE as u16;
 const BTN_EXTRA: u16 = linux::BTN_EXTRA as u16;
 const BTN_TOOL_PEN: u16 = 0x140;
+const BTN_STYLUS: u16 = 0x14b;
+
+// Linux ABS resolution is expressed in units/mm. A non-zero value is part of
+// libinput's minimum tablet capability set; 1000 gives the normalized 16-bit
+// axes a plausible 65.5 mm physical range without changing their coordinates.
+const TABLET_AXIS_RESOLUTION: i32 = 1000;
 
 const BUS_VIRTUAL: u16 = 0x06;
 
@@ -53,14 +59,16 @@ struct InputEvent {
     value: i32,
 }
 
-/// struct uinput_setup: name[80] + input_id(4×u16) + ff_effects_max(u32).
+/// struct uinput_setup: input_id(4×u16) + name[80] + ff_effects_max(u32).
+/// Keep this field order identical to linux/uinput.h: ioctl ABIs use offsets,
+/// not Rust field names.
 #[repr(C)]
 struct UinputSetup {
-    name: [u8; 80],
     bustype: u16,
     vendor: u16,
     product: u16,
     version: u16,
+    name: [u8; 80],
     ff_effects_max: u32,
 }
 
@@ -132,7 +140,7 @@ impl UinputDevice {
         ioctl_u32(&self.file, UI_SET_RELBIT, code as u32)
     }
 
-    fn absbit(&self, code: u16, maximum: i32) -> Result<()> {
+    fn absbit(&self, code: u16, maximum: i32, resolution: i32) -> Result<()> {
         ioctl_u32(&self.file, UI_SET_ABSBIT, code as u32)?;
         let setup = UinputAbsSetup {
             code,
@@ -142,7 +150,7 @@ impl UinputDevice {
             maximum,
             fuzz: 0,
             flat: 0,
-            resolution: 0,
+            resolution,
         };
         let rc = unsafe { libc::ioctl(self.file.as_raw_fd(), UI_ABS_SETUP, &setup) };
         if rc < 0 {
@@ -235,12 +243,10 @@ impl Devices {
         ioctl_u32(&tablet.file, UI_SET_EVBIT, EV_ABS as u32)?;
         ioctl_u32(&tablet.file, UI_SET_EVBIT, EV_SYN as u32)?;
         tablet.keybit(BTN_TOOL_PEN)?;
-        tablet.absbit(ABS_X, 65535)?;
-        tablet.absbit(ABS_Y, 65535)?;
+        tablet.keybit(BTN_STYLUS)?;
+        tablet.absbit(ABS_X, 65535, TABLET_AXIS_RESOLUTION)?;
+        tablet.absbit(ABS_Y, 65535, TABLET_AXIS_RESOLUTION)?;
         tablet.finish()?;
-        // Stay in proximity so hover motion keeps updating the cursor.
-        tablet.emit(EV_KEY, BTN_TOOL_PEN, 1)?;
-        tablet.syn()?;
 
         Ok(Self {
             keyboard,
@@ -252,19 +258,29 @@ impl Devices {
 
 pub struct UinputBackend {
     devices: Devices,
+    absolute_pointer: Option<super::xtest::XtestBackend>,
     held_keys: HashSet<u16>,
     held_buttons: HashSet<u16>,
     wheel: super::WheelAccumulator,
+    tablet_in_proximity: bool,
 }
 
 impl UinputBackend {
     pub fn connect() -> Result<Self> {
         let devices = Devices::create()?;
+        // GNOME treats tablet motion as a separate tablet-tool stream rather
+        // than the desktop core pointer. Xwayland's core warp provides the
+        // Windows absolute-mouse semantics while uinput continues to handle
+        // hardware-like keys, buttons, scrolling, and relative movement.
+        let absolute_pointer =
+            std::env::var_os("DISPLAY").and_then(|_| super::xtest::XtestBackend::connect().ok());
         Ok(Self {
             devices,
+            absolute_pointer,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
             wheel: super::WheelAccumulator::default(),
+            tablet_in_proximity: false,
         })
     }
 }
@@ -312,9 +328,19 @@ impl InputBackend for UinputBackend {
 
     fn motion(&mut self, absolute: bool, x: i32, y: i32) -> Result<()> {
         if absolute {
+            if let Some(pointer) = self.absolute_pointer.as_mut() {
+                return pointer.motion(true, x, y);
+            }
+            // UI_DEV_CREATE returns before the compositor has necessarily
+            // opened the new event node. Emit proximity with the first real
+            // coordinate instead of losing it during device construction.
+            if !self.tablet_in_proximity {
+                self.devices.tablet.emit(EV_KEY, BTN_TOOL_PEN, 1)?;
+            }
             self.devices.tablet.emit(EV_ABS, ABS_X, x.clamp(0, 65535))?;
             self.devices.tablet.emit(EV_ABS, ABS_Y, y.clamp(0, 65535))?;
             self.devices.tablet.syn()?;
+            self.tablet_in_proximity = true;
         } else {
             self.devices.pointer.emit(EV_REL, REL_X, x)?;
             self.devices.pointer.emit(EV_REL, REL_Y, y)?;
@@ -345,6 +371,11 @@ impl InputBackend for UinputBackend {
             self.devices.pointer.emit(EV_KEY, code, 0)?;
         }
         self.held_buttons.clear();
+        if self.tablet_in_proximity {
+            self.devices.tablet.emit(EV_KEY, BTN_TOOL_PEN, 0)?;
+            self.devices.tablet.syn()?;
+            self.tablet_in_proximity = false;
+        }
         self.devices.keyboard.syn()?;
         self.devices.pointer.syn()
     }
@@ -465,8 +496,19 @@ pub(crate) fn vk_to_linux_key(vkey: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::vk_to_linux_key;
+    use super::{vk_to_linux_key, UinputSetup};
     use input_linux_sys as linux;
+
+    #[test]
+    fn uinput_setup_matches_the_linux_ioctl_abi() {
+        assert_eq!(std::mem::size_of::<UinputSetup>(), 92);
+        assert_eq!(std::mem::offset_of!(UinputSetup, bustype), 0);
+        assert_eq!(std::mem::offset_of!(UinputSetup, vendor), 2);
+        assert_eq!(std::mem::offset_of!(UinputSetup, product), 4);
+        assert_eq!(std::mem::offset_of!(UinputSetup, version), 6);
+        assert_eq!(std::mem::offset_of!(UinputSetup, name), 8);
+        assert_eq!(std::mem::offset_of!(UinputSetup, ff_effects_max), 88);
+    }
 
     #[test]
     fn qwerty_row_uses_evdev_physical_positions() {

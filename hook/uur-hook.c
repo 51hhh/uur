@@ -1303,10 +1303,16 @@ UINT WINAPI hook_send_input(UINT count, LPINPUT inputs, int size)
                         (input->ki.dwFlags & KEYEVENTF_KEYUP) ? 0 : 1, 0, 0);
             } else if (input->type == INPUT_MOUSE) {
                 DWORD flags = input->mi.dwFlags;
-                input_forwarded = 1;
+                int handled = 0;
+                int sent = 1;
                 /* MOVE and buttons may share one INPUT. The position must
                  * reach the bridge first so a click lands at its new target. */
-                if (flags & MOUSEEVENTF_MOVE) {
+                int zero_relative_move =
+                    (flags & MOUSEEVENTF_MOVE) &&
+                    !(flags & MOUSEEVENTF_ABSOLUTE) && input->mi.dx == 0 &&
+                    input->mi.dy == 0;
+                if ((flags & MOUSEEVENTF_MOVE) && !zero_relative_move) {
+                    handled = 1;
                     int32_t x = input->mi.dx;
                     int32_t y = input->mi.dy;
                     if (flags & MOUSEEVENTF_ABSOLUTE) {
@@ -1327,29 +1333,33 @@ UINT WINAPI hook_send_input(UINT count, LPINPUT inputs, int size)
                                 primary.bottom - primary.top);
                         }
                     }
-                    input_forwarded &= send_record(UUR_RECORD_MOUSE, 0xffff,
+                    sent &= send_record(UUR_RECORD_MOUSE, 0xffff,
                         (flags & MOUSEEVENTF_ABSOLUTE) != 0, x, y);
                 }
                 if (flags & MOUSEEVENTF_WHEEL) {
+                    handled = 1;
                     /* SendInput carries a signed 32-bit wheel delta. Keep
                      * fractional notches and large deltas intact for the host. */
-                    input_forwarded &= send_record(UUR_RECORD_MOUSE, 0xfffe /*wheel*/,
+                    sent &= send_record(UUR_RECORD_MOUSE, 0xfffe /*wheel*/,
                                 0, 0,
                                 (int32_t)input->mi.mouseData);
                 }
-                if (flags & MOUSEEVENTF_HWHEEL)
-                    input_forwarded &= send_record(UUR_RECORD_MOUSE, 0xfffe,
+                if (flags & MOUSEEVENTF_HWHEEL) {
+                    handled = 1;
+                    sent &= send_record(UUR_RECORD_MOUSE, 0xfffe,
                         0, 1, (int32_t)input->mi.mouseData);
+                }
                 if (flags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP)) {
+                    handled = 1;
                     /* mouseData is a bitmask; either or both side buttons can
                      * change in this INPUT, with independent press/release. */
                     for (uint16_t side = 0; side < 2; ++side) {
                         if (!(input->mi.mouseData & (XBUTTON1 << side)))
                             continue;
                         if (flags & MOUSEEVENTF_XDOWN)
-                            input_forwarded &= send_record(UUR_RECORD_MOUSE, side + 8, 1, 0, 0);
+                            sent &= send_record(UUR_RECORD_MOUSE, side + 8, 1, 0, 0);
                         if (flags & MOUSEEVENTF_XUP)
-                            input_forwarded &= send_record(UUR_RECORD_MOUSE, side + 8, 0, 0, 0);
+                            sent &= send_record(UUR_RECORD_MOUSE, side + 8, 0, 0, 0);
                     }
                 }
                 const DWORD down_flags[3] = {MOUSEEVENTF_LEFTDOWN,
@@ -1357,13 +1367,22 @@ UINT WINAPI hook_send_input(UINT count, LPINPUT inputs, int size)
                 const DWORD up_flags[3] = {MOUSEEVENTF_LEFTUP,
                     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP};
                 for (uint16_t button = 0; button < 3; ++button) {
-                    if (flags & down_flags[button])
-                        input_forwarded &= send_record(UUR_RECORD_MOUSE,
+                    if (flags & down_flags[button]) {
+                        handled = 1;
+                        sent &= send_record(UUR_RECORD_MOUSE,
                             button + 1, 1, 0, 0);
-                    if (flags & up_flags[button])
-                        input_forwarded &= send_record(UUR_RECORD_MOUSE,
+                    }
+                    if (flags & up_flags[button]) {
+                        handled = 1;
+                        sent &= send_record(UUR_RECORD_MOUSE,
                             button + 1, 0, 0, 0);
+                    }
                 }
+                /* UU's virtual-mouse path prefixes every absolute position
+                 * with a zero relative move. It is a Win32-side state update,
+                 * not host motion: leave the pure no-op on Wine's original
+                 * path and avoid alternating the Linux mouse/tablet devices. */
+                input_forwarded = handled && sent;
             }
         }
         ReleaseSRWLockExclusive(&hook_input_lock);
