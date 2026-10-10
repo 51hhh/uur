@@ -284,6 +284,7 @@ async fn portal_worker(
     motion_queued: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut initialized = false;
+    let mut startup_reported = false;
     let desktop = super::wake::DesktopControl::connect().await.ok();
     let mut waiting_for_unlock = false;
     loop {
@@ -296,6 +297,16 @@ async fn portal_worker(
                 eprintln!("screen is locked; preserving the Portal grant until unlock");
                 waiting_for_unlock = true;
             }
+            // The input bridge must listen before the Portal session exists so
+            // a remote input packet can ask the desktop to power its monitors
+            // on. The Portal itself remains deferred until the screen shield
+            // is inactive.
+            if !startup_reported {
+                ready
+                    .send(Ok(restore_token.clone()))
+                    .map_err(|_| anyhow!("portal setup receiver closed"))?;
+                startup_reported = true;
+            }
             if discard_pending_events(&mut receiver, &pending_motion, &motion_queued) {
                 return Ok(());
             }
@@ -306,7 +317,7 @@ async fn portal_worker(
             eprintln!("screen unlocked; restoring the Portal session");
             waiting_for_unlock = false;
         }
-        let token = if initialized {
+        let token = if initialized || startup_reported {
             crate::config::Config::load()?.remote_desktop_restore_token
         } else {
             restore_token.clone()
@@ -318,13 +329,14 @@ async fn portal_worker(
             &pending_motion,
             &motion_queued,
             &mut initialized,
+            &mut startup_reported,
         )
         .await
         {
             Ok(()) => return Ok(()),
-            Err(error) if !initialized => return Err(error),
+            Err(error) if !initialized && !startup_reported => return Err(error),
             Err(error) => {
-                eprintln!("portal session lost: {error}; reconnecting capture and input");
+                eprintln!("portal session unavailable: {error}; reconnecting capture and input");
                 if discard_pending_events(&mut receiver, &pending_motion, &motion_queued) {
                     return Ok(());
                 }
@@ -372,6 +384,7 @@ async fn portal_session_worker(
     pending_motion: &Arc<Mutex<Option<Motion>>>,
     motion_queued: &Arc<AtomicBool>,
     initialized: &mut bool,
+    startup_reported: &mut bool,
 ) -> Result<()> {
     let portal = RemoteDesktop::new().await?;
     let screencast = Screencast::new().await?;
@@ -457,9 +470,12 @@ async fn portal_session_worker(
         let mut capture = CaptureGuard(crate::capture::spawn_helper(pipewire, &streams)?);
         let mut pixel_sizes = vec![None; streams.len()];
         if !*initialized {
-            ready
-                .send(Ok(token))
-                .map_err(|_| anyhow!("portal setup receiver closed"))?;
+            if !*startup_reported {
+                ready
+                    .send(Ok(token))
+                    .map_err(|_| anyhow!("portal setup receiver closed"))?;
+                *startup_reported = true;
+            }
             *initialized = true;
         } else {
             let mut config = crate::config::Config::load()?;

@@ -47,6 +47,10 @@ Portal errors never erase a persistent grant; an invalid token is handled by
 the Portal as required by its API. Remote input also requests monitor power-on
 through the desktop display service, waking a blanked display while leaving
 the lock screen and its authentication intact.
+When uur itself starts under an already locked graphical session, the bridge
+begins listening before Portal restoration. This removes the wake deadlock:
+the first authenticated remote input can power the monitors on even though
+capture and desktop injection remain paused until the screen is unlocked.
 Closing a capture session removes all its transports. A dead heartbeat remains
 rejected until it changes, including after the file is reopened. Wayland
 capture emits empty frames while the Portal is unavailable, rather than
