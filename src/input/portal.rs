@@ -227,7 +227,7 @@ pub struct PortalBackend {
 
 impl PortalBackend {
     pub fn connect() -> Result<Self> {
-        let mut config = crate::config::Config::load()?;
+        let config = crate::config::Config::load()?;
         let restore_token = config.remote_desktop_restore_token.clone();
         let (sender, receiver) = unbounded_channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -258,14 +258,10 @@ impl PortalBackend {
             })
             .context("starting portal input worker")?;
 
-        let fresh_token = ready_receiver
+        ready_receiver
             .recv()
             .context("portal input worker stopped during setup")?
             .map_err(|error| anyhow!(error))?;
-        if fresh_token != config.remote_desktop_restore_token {
-            config.remote_desktop_restore_token = fresh_token;
-            config.store()?;
-        }
 
         Ok(Self {
             sender,
@@ -518,9 +514,6 @@ async fn portal_session_worker(
             }
             *initialized = true;
         } else {
-            let mut config = crate::config::Config::load()?;
-            config.remote_desktop_restore_token = token;
-            config.store()?;
             eprintln!("portal capture and input session restored");
         }
         let mut health = tokio::time::interval(Duration::from_millis(500));

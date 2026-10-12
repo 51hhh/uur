@@ -14,6 +14,25 @@ use std::thread;
 
 use crate::config::{data_dir, Config};
 
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening private file {}", path.display()))?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(contents)
+        .with_context(|| format!("writing private file {}", path.display()))?;
+    file.flush()?;
+    Ok(())
+}
+
 fn rotate_session_log() {
     let state = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -546,15 +565,17 @@ pub fn start() -> Result<()> {
         "x11"
     };
     std::env::set_var("UUR_CAPTURE_BACKEND", capture_backend);
-    std::fs::write(
-        prefix.join("drive_c/uur-bridge.ini"),
+    let bridge_config = prefix.join("drive_c/uur-bridge.ini");
+    write_private_file(
+        &bridge_config,
         format!(
             "[bridge]\nport={}\ntoken={}\nframe_path={}\ncapture_backend={}\n",
             config.bridge_port,
             config.bridge_token,
             unix_path_to_wine(&frames),
             capture_backend
-        ),
+        )
+        .as_bytes(),
     )
     .context("writing uur-bridge.ini")?;
 

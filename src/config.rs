@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Persistent user configuration.  Everything lives under the XDG state and
 /// config directories; the managed Wine prefix lives under data.
@@ -119,6 +123,7 @@ impl Config {
             config.store()?;
             return Ok(config);
         }
+        secure_config_path(&path)?;
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&raw).context("parsing config.toml")
@@ -126,18 +131,91 @@ impl Config {
 
     pub fn store(&self) -> Result<()> {
         let path = config_path()?;
+        self.store_at(&path)
+    }
+
+    fn store_at(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
+            set_private_mode(parent, 0o700)?;
         }
-        std::fs::write(&path, toml::to_string_pretty(self)?)
-            .with_context(|| format!("writing {}", path.display()))
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let name = path
+            .file_name()
+            .context("configuration path has no file name")?
+            .to_string_lossy();
+        let contents = toml::to_string_pretty(self)?;
+
+        let mut temporary = None;
+        for _ in 0..32 {
+            let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temporary_path =
+                parent.join(format!(".{name}.uur-{}-{sequence}.tmp", std::process::id()));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&temporary_path) {
+                Ok(file) => {
+                    temporary = Some((temporary_path, file));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("creating temporary configuration in {}", parent.display())
+                    });
+                }
+            }
+        }
+        let Some((temporary_path, mut file)) = temporary else {
+            anyhow::bail!("could not create a temporary configuration file");
+        };
+
+        let result = (|| -> Result<()> {
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary_path, path)
+                .with_context(|| format!("installing {}", path.display()))?;
+            set_private_mode(path, 0o600)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
+        }
+        result
     }
+}
+
+fn secure_config_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        set_private_mode(parent, 0o700)?;
+    }
+    set_private_mode(path, 0o600)
+}
+
+#[cfg(unix)]
+fn set_private_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("securing {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_mode(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn token_generation_terminates_and_is_wellformed() {
@@ -163,5 +241,30 @@ input_backend = "auto"
         assert!(config.capture_restore_token.is_none());
         assert_eq!(config.capture_source, "monitor");
         assert!(!config.unlock_on_remote_input);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stored_configuration_is_private() {
+        let directory = std::env::temp_dir().join(format!(
+            "uur-config-test-{}-{}",
+            std::process::id(),
+            CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = directory.join("config.toml");
+        let config = Config::default();
+        config.store_at(&path).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let restored: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(restored.bridge_token, config.bridge_token);
+        let _ = std::fs::remove_dir_all(directory);
     }
 }
