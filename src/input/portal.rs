@@ -3,6 +3,7 @@ use ashpd::desktop::remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop};
 use ashpd::desktop::screencast::{CursorMode, Screencast};
 use ashpd::desktop::PersistMode;
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,17 @@ struct PointerTarget {
     x: f64,
     y: f64,
 }
+
+#[derive(Debug)]
+struct MissingPortalStreams;
+
+impl fmt::Display for MissingPortalStreams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RemoteDesktop portal returned no screen streams")
+    }
+}
+
+impl std::error::Error for MissingPortalStreams {}
 
 #[derive(Clone, Copy)]
 struct StreamRect {
@@ -283,6 +295,7 @@ async fn portal_worker(
     pending_motion: Arc<Mutex<Option<Motion>>>,
     motion_queued: Arc<AtomicBool>,
 ) -> Result<()> {
+    let mut startup_restore_token = restore_token;
     let mut initialized = false;
     let mut startup_reported = false;
     let desktop = super::wake::DesktopControl::connect().await.ok();
@@ -303,7 +316,7 @@ async fn portal_worker(
             // is inactive.
             if !startup_reported {
                 ready
-                    .send(Ok(restore_token.clone()))
+                    .send(Ok(startup_restore_token.clone()))
                     .map_err(|_| anyhow!("portal setup receiver closed"))?;
                 startup_reported = true;
             }
@@ -320,8 +333,9 @@ async fn portal_worker(
         let token = if initialized || startup_reported {
             crate::config::Config::load()?.remote_desktop_restore_token
         } else {
-            restore_token.clone()
+            startup_restore_token.clone()
         };
+        let was_restoring = token.is_some();
         match portal_session_worker(
             &mut receiver,
             &ready,
@@ -334,6 +348,24 @@ async fn portal_worker(
         .await
         {
             Ok(()) => return Ok(()),
+            Err(error)
+                if !initialized
+                    && !startup_reported
+                    && was_restoring
+                    && error.downcast_ref::<MissingPortalStreams>().is_some() =>
+            {
+                /* Older uur builds could save a valid device-only grant. GNOME
+                 * restores that grant without showing the chooser, but the
+                 * combined RemoteDesktop session then has no stream ID for
+                 * absolute pointer motion. Consume it once, clear it, and
+                 * negotiate a complete screen-and-input grant. */
+                eprintln!("stored RemoteDesktop grant has no screen sources; retrying without it");
+                let mut config = crate::config::Config::load()?;
+                config.remote_desktop_restore_token = None;
+                config.store()?;
+                startup_restore_token = None;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
             Err(error) if !initialized && !startup_reported => return Err(error),
             Err(error) => {
                 eprintln!("portal session unavailable: {error}; reconnecting capture and input");
@@ -422,21 +454,19 @@ async fn portal_session_worker(
             .await?
             .response()?;
         let selection = portal.start(&session, None).await?.response()?;
-        // Start consumes the old restore token. Preserve its replacement even if
-        // a later capture or EIS setup step fails.
-        let token = selection.restore_token().map(ToOwned::to_owned);
-        let mut config = crate::config::Config::load()?;
-        config.remote_desktop_restore_token = token.clone();
-        config.store()?;
-        let mapping_ids = selection
+        /* A device-only restore token can successfully start while returning
+         * no streams. Validate the combined grant before persisting its
+         * replacement; otherwise every launch silently restores the same
+         * unusable state and falls back to the Xwayland-only pointer. */
+        let selected_streams = selection
             .streams()
-            .context("RemoteDesktop portal returned no screen streams")?
+            .filter(|streams| !streams.is_empty())
+            .ok_or(MissingPortalStreams)?;
+        let mapping_ids = selected_streams
             .iter()
             .map(|stream| stream.mapping_id().map(ToOwned::to_owned))
             .collect::<Vec<_>>();
-        let streams = selection
-            .streams()
-            .context("RemoteDesktop portal returned no screen streams")?
+        let streams = selected_streams
             .iter()
             .map(|stream| crate::capture::PortalStream {
                 node_id: stream.pipe_wire_node_id(),
@@ -448,6 +478,12 @@ async fn portal_session_worker(
             .first()
             .context("RemoteDesktop portal returned no screen stream")?;
         let first_stream_id = first_stream.node_id;
+        // Start consumes the old restore token. Preserve its replacement only
+        // after verifying that it restores both screen sources and devices.
+        let token = selection.restore_token().map(ToOwned::to_owned);
+        let mut config = crate::config::Config::load()?;
+        config.remote_desktop_restore_token = token.clone();
+        config.store()?;
         let mut eis = match Api::load() {
             Ok(api) => match portal.connect_to_eis(&session).await {
                 Ok(fd) => match Eis::connect(api, fd).await {
