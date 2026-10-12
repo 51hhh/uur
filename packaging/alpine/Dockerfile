@@ -16,6 +16,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 FROM alpine:edge
 RUN apk add --no-cache \
-    bash ca-certificates curl glib libx11 libxtst pipewire-libs pulseaudio-utils wine xdg-desktop-portal
+    bash ca-certificates curl glib pipewire-libs pulseaudio-utils wine xdg-desktop-portal
 COPY --from=build /out/ /
 ENTRYPOINT ["/usr/bin/uur"]

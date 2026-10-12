@@ -12,7 +12,7 @@ const UI_SET_EVBIT: libc::Ioctl = 0x4004_5564_u64 as libc::Ioctl;
 const UI_SET_KEYBIT: libc::Ioctl = 0x4004_5565_u64 as libc::Ioctl;
 const UI_SET_RELBIT: libc::Ioctl = 0x4004_5566_u64 as libc::Ioctl;
 const UI_SET_ABSBIT: libc::Ioctl = 0x4004_5567_u64 as libc::Ioctl;
-// struct uinput_setup = input_id(8) + name[80] + ff_effects_max(4) = 92 bytes
+// struct uinput_setup = name[80] + input_id(8) + ff_effects_max(4) = 92 bytes
 const UI_DEV_SETUP: libc::Ioctl = 0x405C_5503_u64 as libc::Ioctl;
 // struct uinput_abs_setup = u16 code + input_absinfo(24) = 28 bytes
 const UI_ABS_SETUP: libc::Ioctl = 0x401C_5504_u64 as libc::Ioctl;
@@ -261,10 +261,8 @@ pub struct UinputBackend {
     absolute_pointer: Option<super::xtest::XtestBackend>,
     held_keys: HashSet<u16>,
     held_buttons: HashSet<u16>,
-    xwayland_buttons: HashSet<u16>,
     wheel: super::WheelAccumulator,
     tablet_in_proximity: bool,
-    absolute_mode: bool,
 }
 
 impl UinputBackend {
@@ -281,10 +279,8 @@ impl UinputBackend {
             absolute_pointer,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
-            xwayland_buttons: HashSet::new(),
             wheel: super::WheelAccumulator::default(),
             tablet_in_proximity: false,
-            absolute_mode: false,
         })
     }
 }
@@ -311,25 +307,6 @@ impl InputBackend for UinputBackend {
     }
 
     fn button(&mut self, button: u16, down: bool) -> Result<()> {
-        // XWarpPointer changes Xwayland's logical pointer without moving the
-        // compositor seat. Keep an absolute virtual-mouse click on that same
-        // X pointer; a uinput button would otherwise use Mutter's unrelated
-        // hardware-pointer focus. Remember where each press went so a mode
-        // change during a drag cannot strand a held X button.
-        if self.xwayland_buttons.contains(&button)
-            || (down && self.absolute_mode && self.absolute_pointer.is_some())
-        {
-            self.absolute_pointer
-                .as_mut()
-                .expect("tracked Xwayland buttons require an X pointer")
-                .button(button, down)?;
-            if down {
-                self.xwayland_buttons.insert(button);
-            } else {
-                self.xwayland_buttons.remove(&button);
-            }
-            return Ok(());
-        }
         let code = match button {
             1 => BTN_LEFT,
             2 => BTN_RIGHT,
@@ -352,9 +329,7 @@ impl InputBackend for UinputBackend {
     fn motion(&mut self, absolute: bool, x: i32, y: i32) -> Result<()> {
         if absolute {
             if let Some(pointer) = self.absolute_pointer.as_mut() {
-                pointer.motion(true, x, y)?;
-                self.absolute_mode = true;
-                return Ok(());
+                return pointer.motion(true, x, y);
             }
             // UI_DEV_CREATE returns before the compositor has necessarily
             // opened the new event node. Emit proximity with the first real
@@ -366,22 +341,15 @@ impl InputBackend for UinputBackend {
             self.devices.tablet.emit(EV_ABS, ABS_Y, y.clamp(0, 65535))?;
             self.devices.tablet.syn()?;
             self.tablet_in_proximity = true;
-            self.absolute_mode = true;
         } else {
             self.devices.pointer.emit(EV_REL, REL_X, x)?;
             self.devices.pointer.emit(EV_REL, REL_Y, y)?;
             self.devices.pointer.syn()?;
-            self.absolute_mode = false;
         }
         Ok(())
     }
 
     fn wheel(&mut self, horizontal: bool, delta: i32) -> Result<()> {
-        if self.absolute_mode {
-            if let Some(pointer) = self.absolute_pointer.as_mut() {
-                return pointer.wheel(horizontal, delta);
-            }
-        }
         let steps = self.wheel.steps(horizontal, delta);
         if steps == 0 {
             return Ok(());
@@ -395,10 +363,6 @@ impl InputBackend for UinputBackend {
     }
 
     fn release_all(&mut self) -> Result<()> {
-        if let Some(pointer) = self.absolute_pointer.as_mut() {
-            pointer.release_all()?;
-        }
-        self.xwayland_buttons.clear();
         for code in self.held_keys.clone() {
             self.devices.keyboard.emit(EV_KEY, code, 0)?;
         }

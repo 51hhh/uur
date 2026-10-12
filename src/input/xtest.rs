@@ -1,118 +1,19 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::ffi::CStr;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, Keycode};
+use x11rb::protocol::xtest::ConnectionExt as XtestExt;
 use x11rb::rust_connection::RustConnection;
 
 use super::InputBackend;
 
-type Handle = *mut libc::c_void;
-
-struct Library(Handle);
-
-impl Drop for Library {
-    fn drop(&mut self) {
-        unsafe { libc::dlclose(self.0) };
-    }
-}
-
-struct XlibInjector {
-    display: Handle,
-    close_display: unsafe extern "C" fn(Handle) -> libc::c_int,
-    flush: unsafe extern "C" fn(Handle) -> libc::c_int,
-    fake_key: unsafe extern "C" fn(Handle, libc::c_uint, libc::c_int, libc::c_ulong) -> libc::c_int,
-    fake_button:
-        unsafe extern "C" fn(Handle, libc::c_uint, libc::c_int, libc::c_ulong) -> libc::c_int,
-    fake_relative_motion:
-        unsafe extern "C" fn(Handle, libc::c_int, libc::c_int, libc::c_ulong) -> libc::c_int,
-    _xtst: Library,
-    _x11: Library,
-}
-
-// The bridge's shared-input mutex serializes access to this Display. Xlib is
-// initialized for threads as well because successive events can be handled by
-// different connection workers.
-unsafe impl Send for XlibInjector {}
-
-impl XlibInjector {
-    fn connect() -> Result<Self> {
-        unsafe fn open(name: &CStr) -> Result<Library> {
-            let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-            if handle.is_null() {
-                anyhow::bail!("{} is not available", name.to_string_lossy());
-            }
-            Ok(Library(handle))
-        }
-
-        unsafe fn symbol<T: Copy>(library: &Library, name: &CStr) -> Result<T> {
-            let pointer = unsafe { libc::dlsym(library.0, name.as_ptr()) };
-            if pointer.is_null() {
-                anyhow::bail!("missing native symbol {}", name.to_string_lossy());
-            }
-            // The requested types below exactly match the public Xlib/XTest C ABI.
-            Ok(unsafe { std::mem::transmute_copy::<Handle, T>(&pointer) })
-        }
-
-        let x11 = unsafe { open(c"libX11.so.6")? };
-        let open_display: unsafe extern "C" fn(*const libc::c_char) -> Handle =
-            unsafe { symbol(&x11, c"XOpenDisplay")? };
-        let init_threads: unsafe extern "C" fn() -> libc::c_int =
-            unsafe { symbol(&x11, c"XInitThreads")? };
-        let close_display = unsafe { symbol(&x11, c"XCloseDisplay")? };
-        let flush = unsafe { symbol(&x11, c"XFlush")? };
-        if unsafe { init_threads() } == 0 {
-            anyhow::bail!("XInitThreads failed");
-        }
-        let xtst = unsafe { open(c"libXtst.so.6")? };
-        let fake_key = unsafe { symbol(&xtst, c"XTestFakeKeyEvent")? };
-        let fake_button = unsafe { symbol(&xtst, c"XTestFakeButtonEvent")? };
-        let fake_relative_motion = unsafe { symbol(&xtst, c"XTestFakeRelativeMotionEvent")? };
-        let display = unsafe { open_display(std::ptr::null()) };
-        if display.is_null() {
-            anyhow::bail!("XOpenDisplay failed");
-        }
-        Ok(Self {
-            display,
-            close_display,
-            flush,
-            fake_key,
-            fake_button,
-            fake_relative_motion,
-            _xtst: xtst,
-            _x11: x11,
-        })
-    }
-
-    fn key(&self, keycode: u8, down: bool) -> Result<()> {
-        let result = unsafe { (self.fake_key)(self.display, keycode.into(), down.into(), 0) };
-        self.finish(result, "XTestFakeKeyEvent")
-    }
-
-    fn button(&self, button: u8, down: bool) -> Result<()> {
-        let result = unsafe { (self.fake_button)(self.display, button.into(), down.into(), 0) };
-        self.finish(result, "XTestFakeButtonEvent")
-    }
-
-    fn relative_motion(&self, x: i32, y: i32) -> Result<()> {
-        let result = unsafe { (self.fake_relative_motion)(self.display, x, y, 0) };
-        self.finish(result, "XTestFakeRelativeMotionEvent")
-    }
-
-    fn finish(&self, result: libc::c_int, operation: &'static str) -> Result<()> {
-        if result == 0 {
-            anyhow::bail!("{operation} failed");
-        }
-        unsafe { (self.flush)(self.display) };
-        Ok(())
-    }
-}
-
-impl Drop for XlibInjector {
-    fn drop(&mut self) {
-        unsafe { (self.close_display)(self.display) };
-    }
-}
+const FAKE_KEY_PRESS: u8 = 2;
+const FAKE_KEY_RELEASE: u8 = 3;
+const FAKE_BUTTON_PRESS: u8 = 4;
+const FAKE_BUTTON_RELEASE: u8 = 5;
+const FAKE_MOTION: u8 = 6;
+/// XTEST detail for motion: 0 = absolute, 1 = relative.
+const MOTION_RELATIVE: u8 = 1;
 
 /// X11 XTest injection.  Works on every X11 session; on XWayland it reaches
 /// XWayland-native windows only, which is why the portal backend is
@@ -120,25 +21,20 @@ impl Drop for XlibInjector {
 pub struct XtestBackend {
     conn: RustConnection,
     screen: usize,
-    injector: XlibInjector,
     held_keys: HashSet<Keycode>,
     held_buttons: HashSet<u8>,
     wheel: super::WheelAccumulator,
-    absolute_warp_pending: bool,
 }
 
 impl XtestBackend {
     pub fn connect() -> Result<Self> {
         let (conn, screen) = x11rb::connect(None).context("connecting to X display")?;
-        let injector = XlibInjector::connect().context("initializing XTEST")?;
         Ok(Self {
             conn,
             screen,
-            injector,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
             wheel: super::WheelAccumulator::default(),
-            absolute_warp_pending: false,
         })
     }
 
@@ -151,18 +47,11 @@ impl XtestBackend {
         (root.width_in_pixels as i16, root.height_in_pixels as i16)
     }
 
-    fn synchronize_absolute_warp(&mut self) -> Result<()> {
-        if self.absolute_warp_pending {
-            // XWarpPointer and libXtst use separate X connections. Wait only
-            // before the first dependent event so high-rate motion itself
-            // stays asynchronous and does not acquire one round trip per frame.
-            self.conn
-                .get_input_focus()
-                .context("synchronizing XWarpPointer")?
-                .reply()
-                .context("synchronizing XWarpPointer reply")?;
-            self.absolute_warp_pending = false;
-        }
+    fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<()> {
+        self.conn
+            .xtest_fake_input(kind, detail, 0, self.root(), x, y, 0)
+            .context("XTestFakeInput")?;
+        self.conn.flush()?;
         Ok(())
     }
 }
@@ -174,7 +63,16 @@ impl InputBackend for XtestBackend {
 
     fn key(&mut self, vkey: u16, down: bool) -> Result<()> {
         let keycode = self.vkey_to_keycode(vkey)?;
-        self.injector.key(keycode, down)?;
+        self.fake(
+            if down {
+                FAKE_KEY_PRESS
+            } else {
+                FAKE_KEY_RELEASE
+            },
+            keycode,
+            0,
+            0,
+        )?;
         if down {
             self.held_keys.insert(keycode);
         } else {
@@ -184,7 +82,6 @@ impl InputBackend for XtestBackend {
     }
 
     fn button(&mut self, button: u16, down: bool) -> Result<()> {
-        self.synchronize_absolute_warp()?;
         let button = match button {
             1 => 1,
             2 => 3, // Windows right button is X11 button 3.
@@ -193,7 +90,16 @@ impl InputBackend for XtestBackend {
             9 => 9,
             _ => anyhow::bail!("unsupported pointer button {button}"),
         };
-        self.injector.button(button as u8, down)?;
+        self.fake(
+            if down {
+                FAKE_BUTTON_PRESS
+            } else {
+                FAKE_BUTTON_RELEASE
+            },
+            button as u8,
+            0,
+            0,
+        )?;
         if down {
             self.held_buttons.insert(button as u8);
         } else {
@@ -214,10 +120,8 @@ impl InputBackend for XtestBackend {
                 .warp_pointer(x11rb::NONE, self.root(), 0, 0, 0, 0, clamped_x, clamped_y)
                 .context("XWarpPointer")?;
             self.conn.flush()?;
-            self.absolute_warp_pending = true;
         } else {
-            self.synchronize_absolute_warp()?;
-            self.injector.relative_motion(x, y)?;
+            self.fake(FAKE_MOTION, MOTION_RELATIVE, x as i16, y as i16)?;
         }
         Ok(())
     }
@@ -227,27 +131,21 @@ impl InputBackend for XtestBackend {
         // 6/7 (horizontal) presses, one per notch.
         let (up_button, down_button) = if horizontal { (7u8, 6u8) } else { (4u8, 5u8) };
         let steps = self.wheel.steps(horizontal, delta);
-        if steps != 0 {
-            self.synchronize_absolute_warp()?;
-        }
         for _ in 0..steps.unsigned_abs() {
             let button = if steps > 0 { up_button } else { down_button };
-            self.injector.button(button, true)?;
-            self.injector.button(button, false)?;
+            self.fake(FAKE_BUTTON_PRESS, button, 0, 0)?;
+            self.fake(FAKE_BUTTON_RELEASE, button, 0, 0)?;
         }
         Ok(())
     }
 
     fn release_all(&mut self) -> Result<()> {
-        if !self.held_buttons.is_empty() {
-            self.synchronize_absolute_warp()?;
-        }
         for keycode in self.held_keys.clone() {
-            self.injector.key(keycode, false)?;
+            self.fake(FAKE_KEY_RELEASE, keycode, 0, 0)?;
         }
         self.held_keys.clear();
         for button in self.held_buttons.clone() {
-            self.injector.button(button, false)?;
+            self.fake(FAKE_BUTTON_RELEASE, button, 0, 0)?;
         }
         self.held_buttons.clear();
         self.conn.flush()?;

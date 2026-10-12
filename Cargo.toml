@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 toml = "0.8"
 libc = "0.2"
 input-linux-sys = "0.9"
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["xtest"] }
 signal-hook = "0.3"
 
 [profile.release]

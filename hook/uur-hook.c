@@ -672,17 +672,9 @@ static void draw_cursor_overlay(HDC hdc_dest, int x, int y, int width, int heigh
                                                  icon.hbmColor != NULL);
         shape.hotspot_x = (int)icon.xHotspot;
         shape.hotspot_y = (int)icon.yHotspot;
-        if (uur_map_cursor_overlay(&source, &destination, &shape, &overlay) &&
+        if (uur_map_cursor_overlay(&source, &destination, &shape, &overlay))
             DrawIconEx(hdc_dest, overlay.x, overlay.y, cursor.hCursor,
-                       overlay.width, overlay.height, 0, NULL, DI_NORMAL)) {
-            /* The fast capture path writes the next frame directly into the
-             * selected DIB's backing memory. Commit the GDI cursor draw before
-             * the client reads those pixels; otherwise it can remain queued
-             * until the next frame's pre-copy flush and then be overwritten
-             * immediately, making hit testing move while the remote cursor
-             * appears frozen. */
-            GdiFlush();
-        }
+                       overlay.width, overlay.height, 0, NULL, DI_NORMAL);
     }
     if (icon.hbmColor != NULL)
         DeleteObject(icon.hbmColor);
@@ -969,15 +961,9 @@ static BOOL feed_capture_frame(HDC hdc_dest, int x, int y, int width,
     return result;
 }
 
-enum capture_feed_result {
-    CAPTURE_FEED_NOT_HANDLED = 0,
-    CAPTURE_FEED_FRAME = 1,
-    CAPTURE_FEED_UNAVAILABLE = 2,
-};
-
-static enum capture_feed_result try_capture_feed(
-    HDC hdc_dest, int x, int y, DWORD rop, HDC hdc_src, int width, int height,
-    int source_x, int source_y, int source_width, int source_height)
+static BOOL try_capture_feed(HDC hdc_dest, int x, int y, DWORD rop,
+                             HDC hdc_src, int width, int height, int source_x,
+                             int source_y, int source_width, int source_height)
 {
     InterlockedIncrement(&capture_calls);
     /* The client's desktop capture is an SRCCOPY blit whose source is the
@@ -987,7 +973,7 @@ static enum capture_feed_result try_capture_feed(
         if (feed_capture_frame(hdc_dest, x, y, width, height, source_x,
                                source_y, source_width, source_height)) {
             InterlockedIncrement(&capture_rendered);
-            return CAPTURE_FEED_FRAME;
+            return TRUE;
         }
         /* XWayland cannot provide a current Wayland desktop after Portal
          * disconnects. Publish an empty frame while it reconnects instead of
@@ -1011,25 +997,21 @@ static enum capture_feed_result try_capture_feed(
             InterlockedIncrement(&capture_unavailable);
             BOOL cleared = PatBlt(hdc_dest, x, y, width, height, BLACKNESS);
             GdiFlush();
-            return cleared ? CAPTURE_FEED_UNAVAILABLE
-                           : CAPTURE_FEED_NOT_HANDLED;
+            return cleared;
         }
     }
     InterlockedIncrement(&capture_fallbacks);
-    return CAPTURE_FEED_NOT_HANDLED;
+    return FALSE;
 }
 
 BOOL WINAPI hook_bit_blt(HDC hdc_dest, int x, int y, int width, int height,
                          HDC hdc_src, int x_src, int y_src, DWORD rop)
 {
     BOOL result;
-    enum capture_feed_result feed = try_capture_feed(
-        hdc_dest, x, y, rop, hdc_src, width, height, x_src, y_src, width,
-        height);
-    if (feed != CAPTURE_FEED_NOT_HANDLED) {
-        if (feed == CAPTURE_FEED_FRAME)
-            draw_cursor_overlay(hdc_dest, x, y, width, height, x_src, y_src,
-                                width, height);
+    if (try_capture_feed(hdc_dest, x, y, rop, hdc_src, width, height, x_src,
+                         y_src, width, height)) {
+        draw_cursor_overlay(hdc_dest, x, y, width, height, x_src, y_src,
+                            width, height);
         return TRUE;
     }
     result = original_bit_blt(hdc_dest, x, y, width, height, hdc_src, x_src,
@@ -1046,11 +1028,9 @@ BOOL WINAPI hook_stretch_blt(HDC hdc_dest, int x, int y, int w, int h,
                              DWORD rop)
 {
     BOOL result;
-    enum capture_feed_result feed = try_capture_feed(
-        hdc_dest, x, y, rop, hdc_src, w, h, xs, ys, sw, sh);
-    if (feed != CAPTURE_FEED_NOT_HANDLED) {
-        if (feed == CAPTURE_FEED_FRAME)
-            draw_cursor_overlay(hdc_dest, x, y, w, h, xs, ys, sw, sh);
+    if (try_capture_feed(hdc_dest, x, y, rop, hdc_src, w, h, xs, ys, sw,
+                         sh)) {
+        draw_cursor_overlay(hdc_dest, x, y, w, h, xs, ys, sw, sh);
         return TRUE;
     }
     result = original_stretch_blt(hdc_dest, x, y, w, h, hdc_src, xs, ys, sw,

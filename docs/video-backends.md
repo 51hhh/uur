@@ -24,10 +24,6 @@ that position by the monitor scale; using the Portal layout size as the input
 extent would apply the fractional scale twice and move the cursor toward the
 top-left corner. Forwarded mouse and virtual-key events are injected once through the host
 backend, and combined motion/button events deliver their position first.
-On the Wayland uinput fallback, absolute virtual-mouse motion, buttons, and
-wheel events stay on one Xwayland pointer so clicks and scrolling use the same
-position shown in the shared frame. Relative mouse motion continues through
-uinput for compositor-wide desktop control.
 Unicode, scan-code, and unmapped virtual-key events retain Wine's original
 injection path; the native bridge receives only its invariant mapped subset.
 

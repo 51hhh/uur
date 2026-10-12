@@ -18,8 +18,6 @@ depends=(
     'glibc'
     'gcc-libs'
     'glib2'
-    'libx11'
-    'libxtst'
     'wine'
     'curl'
     'pipewire'
