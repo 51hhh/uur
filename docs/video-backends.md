@@ -41,6 +41,8 @@ expired input session closes the old session and negotiates a replacement
 using the saved Portal grant. Queued commands from the failed session are
 discarded; release events for inputs not held in the replacement session are
 ignored. The PE hook reconnects its loopback input bridge after a lost socket.
+Combined RemoteDesktop and independent ScreenCast grants keep separate restore
+tokens; a token is reused only by the Portal flow that issued it.
 When a desktop lock closes RemoteDesktop/EIS, uur waits for the screen shield
 to become inactive before spending the single-use restore token. Transient
 Portal errors never erase a persistent grant; an invalid token is handled by

@@ -160,13 +160,10 @@ pub(crate) fn remove_frame_files(base: &std::path::Path) {
 /// the token would turn a lock-screen interruption into repeated prompts.
 #[allow(clippy::type_complexity)]
 fn portal_session(config: &mut Config) -> Result<(OwnedFd, Vec<PortalStream>)> {
-    // A combined RemoteDesktop session owns the same ScreenCast selection.
-    // If GNOME temporarily inhibits a new RemoteDesktop session, reuse its
-    // restore token for the capture-only fallback before showing a new chooser.
-    let saved_token = config
-        .capture_restore_token
-        .clone()
-        .or_else(|| config.remote_desktop_restore_token.clone());
+    // Restore tokens belong to the Portal flow that issued them. A combined
+    // RemoteDesktop grant cannot be reused by this independent ScreenCast
+    // session, even though both flows eventually expose PipeWire streams.
+    let saved_token = config.capture_restore_token.clone();
     let runtime = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
     runtime.block_on(async move {
         let screencast = ashpd::desktop::screencast::Screencast::new()
