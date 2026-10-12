@@ -421,6 +421,21 @@ pub fn launch() -> Result<()> {
         return Ok(());
     }
 
+    // Once login autostart has installed the user service, keep every later
+    // CLI launch under the same supervisor owner. Otherwise `uur run` after a
+    // manual stop would create an untracked detached process while the unit
+    // misleadingly remained inactive.
+    if crate::autostart::start_managed_service()? {
+        for _ in 0..250 {
+            if let Some((pid, _)) = live_session_identity()? {
+                println!("{}", t!("session.started_service", pid = pid));
+                return Ok(());
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        anyhow::bail!("{}", t!("session.service_timeout"));
+    }
+
     let executable = std::env::current_exe().context("resolving uur executable")?;
     let log_path = state_dir().join("supervisor.log");
     std::fs::create_dir_all(state_dir()).context("creating state directory")?;
@@ -779,6 +794,10 @@ fn log_path() -> Result<PathBuf> {
 /// Wine processes, and drop the bridge connection.
 pub fn stop() -> Result<()> {
     let prefix = data_dir()?.join("wine");
+    // If autostart owns the supervisor, stop it through systemd so the unit's
+    // restart policy cannot race the process-level cleanup below. This is a
+    // no-op for a currently detached manual session.
+    let _ = crate::autostart::stop_managed_service()?;
     if let Some((pid, start)) = read_session_identity()? {
         if process_start_time(pid).ok() == Some(start) {
             unsafe {

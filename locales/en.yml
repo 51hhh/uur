@@ -50,6 +50,8 @@ session:
   already_running: "a session is already running - use it, or run `uur stop` first"
   already_running_pid: "a session is already running (supervisor PID %{pid}); use it, or run `uur stop` first"
   started_background: "uur started in the background (supervisor PID %{pid}); log: %{path}"
+  started_service: "uur.service started the managed session (supervisor PID %{pid})"
+  service_timeout: "uur.service started but its supervisor did not acquire the session lock"
   background_failed: "the background supervisor exited during startup (%{status}); see %{path}"
   background_timeout: "the background supervisor did not acquire its session lock; see %{path}"
   server_running: "GameViewerServer is running"

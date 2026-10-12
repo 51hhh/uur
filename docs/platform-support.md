@@ -220,10 +220,12 @@ uur setup --accept-eula
 uur run
 ```
 
-`uur run` starts the session supervisor in the background and returns after it
-has acquired its single-instance lock. Its startup output is written to
-`$XDG_STATE_HOME/uur/supervisor.log`; `uur stop` ends the supervisor, helpers,
-and managed Wine prefix.
+`uur run` starts the session supervisor and returns after it has acquired its
+single-instance lock. When login autostart is enabled, the command starts the
+installed `uur.service` so systemd retains supervision; otherwise it launches
+a detached supervisor whose startup output is written to
+`$XDG_STATE_HOME/uur/supervisor.log`. `uur stop` stops the user service when
+present, then ends the supervisor, helpers, and managed Wine prefix.
 
 Optional host integration is managed explicitly:
 

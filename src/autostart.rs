@@ -80,6 +80,28 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
+/// Start the installed user service when login autostart owns the session.
+/// Returning false preserves the detached CLI fallback on desktops where the
+/// service has not been installed or the user manager is unavailable.
+pub(crate) fn start_managed_service() -> Result<bool> {
+    if !unit_path()?.is_file() || !systemd_user_available() {
+        return Ok(false);
+    }
+    systemctl(&["start", UNIT_NAME])?;
+    Ok(true)
+}
+
+/// Stop the installed user service before the process-level cleanup path.
+/// An explicit systemd stop also suppresses Restart=on-failure while the
+/// supervisor and its Wine prefix are shutting down.
+pub(crate) fn stop_managed_service() -> Result<bool> {
+    if !unit_path()?.is_file() || !systemd_user_available() {
+        return Ok(false);
+    }
+    systemctl(&["stop", UNIT_NAME])?;
+    Ok(true)
+}
+
 fn enable_systemd(executable: &Path) -> Result<()> {
     let path = unit_path()?;
     std::fs::create_dir_all(path.parent().context("systemd user path has no parent")?)?;

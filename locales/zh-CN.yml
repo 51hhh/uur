@@ -38,6 +38,8 @@ session:
   already_running: "会话已在运行 —— 直接使用它，或先执行 `uur stop`"
   already_running_pid: "会话已在运行（监督进程 PID %{pid}）—— 直接使用它，或先执行 `uur stop`"
   started_background: "uur 已在后台启动（监督进程 PID %{pid}）；日志：%{path}"
+  started_service: "uur.service 已启动受管会话（监督进程 PID %{pid}）"
+  service_timeout: "uur.service 已启动，但监督进程未能取得会话锁"
   background_failed: "后台监督进程启动时退出（%{status}）；请查看 %{path}"
   background_timeout: "后台监督进程未能取得会话锁；请查看 %{path}"
   server_running: "GameViewerServer 正在运行"
